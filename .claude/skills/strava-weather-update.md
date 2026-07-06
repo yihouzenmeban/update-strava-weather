@@ -1,0 +1,179 @@
+---
+name: strava-weather-update
+description: 拉取最新一次 Strava 活动，按活动时间/地点查询天气，按 gearaut 风格生成标题和描述（含天气 emoji、体感>30 加 🥵、体感<0 加 🥶），并通过本地脚本更新到 Strava。当用户说"更新 Strava 天气 / 给活动加天气 / 同步天气到 Strava"或类似时使用。
+---
+
+# Strava 活动天气标注
+
+把最新一次 Strava 活动补上 gearaut 风格的天气标题和描述。流程：MCP 拉活动 → open-meteo 拉天气 → 按规则生成标题/描述 → 本地脚本更新。
+
+仓库根目录：`.`
+
+## 前置条件
+
+- Strava MCP 已连接（只读，能拉本人活动）。
+- 本地脚本 `update_strava_weather.sh` 已配好 `strava_config.sh`（CLIENT_ID / CLIENT_SECRET），且 Strava 应用的 **Authorization Callback Domain = localhost**。
+- 脚本首次运行会自动开浏览器授权、缓存令牌到 `.strava_tokens.json`，之后自动刷新。
+
+## 执行步骤
+
+### 1. 拉最新活动
+
+调 `mcp__strava__list_activities`，`first=1`，`ordering=StartDateLocalDesc`。取返回的第一条活动，记下：
+- `id`
+- `name`（原始标题）
+- `start_local`（本地开始时间，如 `2026-07-02T07:37:16`）
+- `summary.moving_time`（秒）
+
+如果用户指定了某个活动 ID，跳过本步，直接用该 ID，并通过 `GET /activities/{id}`（脚本内部会拉）或 MCP 拿到上述字段。
+
+### 2. 拿活动起点坐标
+
+调 `mcp__strava__get_activity_streams`，`streams=["location"]`，取第一个非 null 的 `[lat, lng]` 作为天气查询点。
+- 如果没有 location 流（室内/无 GPS），向用户询问活动发生的城市或地点，用 open-meteo 的 geocoding 拿坐标；若用户确认是常用地点（如望京），可用兜底坐标。
+
+### 3. 查天气
+
+用 Bash 调 open-meteo（无需 key），**优先用 15 分钟间隔的 `minutely_15`**，时区 `Asia/Shanghai`：
+
+```bash
+curl -s "https://api.open-meteo.com/v1/forecast?latitude=LAT&longitude=LNG&minutely_15=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,cloud_cover,weather_code,precipitation&timezone=Asia%2FShanghai&past_days=3&forecast_days=2"
+```
+
+> 近期活动（几天内）用上面的 forecast `minutely_15`。**历史活动（约 5 天前及更早）forecast 拉不到，改用 archive API（仅 hourly）**：
+> ```bash
+> curl -s "https://archive-api.open-meteo.com/v1/archive?latitude=LAT&longitude=LNG&start_date=DATE&end_date=DATE&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,cloud_cover,weather_code,precipitation&timezone=Asia%2FShanghai"
+> ```
+> archive 没有 `minutely_15`，用 hourly 即可。
+
+### 4. 取活动时段内的最小值和最大值
+
+- 活动开始时间 = `start_local`
+- 活动结束时间 = 开始时间 + `moving_time` 秒
+- 对 `temperature_2m`、`apparent_temperature`、`relative_humidity_2m`、`wind_speed_10m` 这四个字段，**在活动时段 [开始, 结束] 内取最小值和最大值**：
+  - 收集所有时间戳落在 [开始, 结束] 区间内的 15 分钟（或 hourly）采样点；
+  - 再补上开始、结束两个时刻的线性插值值，保证边界不被漏掉；
+  - 从这个集合里取 `min` 和 `max`。
+- 得到 8 个值：`t_min,t_max`（气温）、`at_min,at_max`（体感）、`h_min,h_max`（湿度）、`w_min,w_max`（风速）。
+- 全部**保留 2 位小数**。
+- 描述里一律按 **min - max（升序）** 排列，不按时间顺序。
+
+### 5. 选天气主 emoji（AI 自己判断）
+
+根据活动时段的天气（降水、weather_code、云量、能见度、风等）**自己判断**选一个最贴切的主 emoji，不要求死板对照。参考表（open-meteo 用 WMO weather_code）：
+
+| weather_code | 含义 | emoji |
+|---|---|---|
+| 0 | 晴空 | 🌞 |
+| 1 | 大部晴 | 🌞 |
+| 2 | 多云 | ⛅ |
+| 3 | 阴 | ☁️ |
+| 45, 48 | 雾 / 霾 | 🌫️ |
+| 51–57, 61–67, 80–82 | 毛毛雨 / 雨 | 🌧️ |
+| 71–77, 85–86 | 雪 | ❄️ |
+| 95–99 | 雷暴 | ⛈️ |
+
+辅助参考（与 weather_code 冲突时以 weather_code 为主，AI 综合判断）：
+- cloud_cover：<50% 🌞 / 50–85% ⛅ / >85% ☁️
+- 夜间（本地 20:00–05:00）且无降水无雾 → 🌙
+- 风速极大（>30 km/h）可在主 emoji 后再加 💨，但通常只取 1 个主 emoji
+- 综合整个活动时段的天气选最合适的（如跑动中转雨用 🌧️），不只看开始时刻
+
+> 通常只选 1 个主 emoji，根据实际天气选最贴切的。
+
+### 6. 体感温度加 🥵 / 🥶
+
+根据活动时段内体感温度（apparent_temperature）的极值（第 4 步已算出）：
+- `at_max > 30` → 主 emoji 后追加 🥵
+- `at_min < 0` → 主 emoji 后追加 🥶
+- 两者都不触发就不加
+
+例：体感 31.5°C → `☁️🥵`；体感 -2°C → `⛅🥶`；体感 15°C → `☁️`
+
+### 7. 生成天气 emoji 和天气描述块
+
+这一步只生成**要追加的内容**，不生成完整标题/描述（脚本会自己拉取活动当前内容并追加）。
+
+**WEATHER_EMOJI**（追加到标题末尾的 emoji 串）：主 emoji（第 5 步 AI 判断）+ 若第 6 步触发则再拼 `🥵` 或 `🥶`。
+- 例：`☁️🥵`、`🌞`、`🌧️🥵`、`🌫️`、`⛅🥶`
+
+**WEATHER_DESC**（追加到描述末尾的天气块，严格按此模板，值用第 4 步的 min/max，保留 2 位小数）：
+
+```
+温度: {t_min}°C - {t_max}°C  体感温度: {at_min}°C - {at_max}°C
+湿度: {h_min}% - {h_max}%  风速: {w_min} km/h - {w_max} km/h
+Powered By www.gearaut.com
+```
+
+注意：所有字段都是 **min - max（升序）**，不是起点/终点顺序。
+
+### 8. 先预览，等用户确认后再覆盖
+
+把 WEATHER_EMOJI 和 WEATHER_DESC 写进临时文件（避免 shell 引号/换行问题）。
+
+**先跑 dry-run 预览**（不改 Strava）：
+
+```bash
+printf '%s' '☁️🥵' > /tmp/strava_emoji.txt
+printf '%s' '温度: 25.25°C - 27.39°C  体感温度: 29.59°C - 31.53°C
+湿度: 82.83% - 70.38%  风速: 3.58 km/h - 2.81 km/h
+Powered By www.gearaut.com' > /tmp/strava_desc.txt
+
+cd .
+ACTIVITY_ID=123 \
+WEATHER_EMOJI_FILE=/tmp/strava_emoji.txt \
+WEATHER_DESC_FILE=/tmp/strava_desc.txt \
+./update_strava_weather.sh show
+```
+
+脚本会拉取活动当前内容，打印出：
+- 原标题 / 新标题
+- 原描述 / 新描述
+
+**把脚本打印的新旧对比贴给用户，明确询问是否确认覆盖。必须等用户明确回复"确认/可以/yes"后才能进入下一步。** 用户若要求修改 emoji 或数值，回到第 5–7 步调整后重新预览。
+
+### 9. 确认后执行更新
+
+用户确认后，加 `YES=1` 跳过交互确认，真正写入：
+
+```bash
+ACTIVITY_ID=123 \
+WEATHER_EMOJI_FILE=/tmp/strava_emoji.txt \
+WEATHER_DESC_FILE=/tmp/strava_desc.txt \
+YES=1 ./update_strava_weather.sh
+```
+
+脚本流程：
+1. 拉取活动当前的 name 和 description
+2. 标题：去掉末尾已有的天气 emoji，追加 `WEATHER_EMOJI`
+3. 描述：去掉旧的 `温度:...Powered By www.gearaut.com` 块，追加 `WEATHER_DESC`
+4. PUT 更新
+
+令牌处理：有缓存且有效 → 直接用；过期 → 自动刷新；无令牌或刷新失败 → 自动开浏览器授权（提示用户点 Authorize）。
+
+成功标志：脚本输出 `✅ 更新成功` 并打印更新后的 name / description。
+
+### 10. 收尾
+
+- 更新成功后，把最终更新后的标题和描述贴给用户。
+- 清理临时文件。
+
+错误处理：
+- 如果脚本报 404：令牌账号不是活动拥有者，或 scope 缺 `activity:read_all`，提醒用户重新授权（scope 必须含 `activity:read_all,activity:write`）。
+- 如果报 "Application invalid"：Strava 应用 Callback Domain 没设成 `localhost`，提醒去 https://www.strava.com/settings/api 改。
+- 如果报 "invalid encoding"：用 `*_FILE` 方式传值（脚本已内置），不要用 `-d` 内联 JSON。
+
+## 批量更新
+
+用户可一次给多个活动 ID。逐个走第 2–9 步：拉坐标、查天气、生成、预览。可把 5 个预览汇总成一张表一次性贴给用户确认，确认后用循环逐个 `YES=1` 更新。
+
+## 规则速查
+
+- 主 emoji：AI 根据 weather_code / 云量 / 时段综合判断（🌞⛅☁️🌫️🌧️❄️⛈️🌙 等），通常 1 个
+- 取值：活动时段内各字段的 **min 和 max**（非起点/终点）
+- 🥵 触发：`活动时段体感最大值 > 30`
+- 🥶 触发：`活动时段体感最小值 < 0`
+- 描述模板：`温度 / 体感` 一行，`湿度 / 风速` 一行，`Powered By www.gearaut.com` 一行
+- 所有数值保留 2 位小数
+- 值一律 **min - max（升序）** 排列
+- 近期活动用 forecast `minutely_15`（15 分钟），历史活动用 archive `hourly`

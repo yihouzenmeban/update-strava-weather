@@ -1,0 +1,8 @@
+# Strava 应用密钥（含 CLIENT_SECRET，敏感）
+strava_config.sh
+
+# Strava 令牌缓存（含 access/refresh token，敏感）
+.strava_tokens.json
+
+# 系统杂物
+.DS_Store
