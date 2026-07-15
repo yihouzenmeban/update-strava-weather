@@ -51,7 +51,6 @@ check_config() {
   if [[ -z "${CLIENT_SECRET:-}" || "$CLIENT_SECRET" == *"在这里粘贴"* ]]; then
     die "请先创建 strava_config.sh（参考 strava_config.example.sh）并填好 CLIENT_SECRET"
   fi
-  [[ -n "${ACTIVITY_ID:-}" ]] || die "请通过环境变量 ACTIVITY_ID 指定要更新的活动 ID"
   return 0
 }
 
@@ -182,6 +181,8 @@ print("✅ 已刷新")
 
 # 更新活动：拉取当前 name/description，去掉旧天气标注，追加新天气后 PUT
 do_update() {
+  [[ -n "${ACTIVITY_ID:-}" ]] || die "请通过环境变量 ACTIVITY_ID 指定要更新的活动 ID"
+
   if ! ensure_token; then
     echo "→ 启动浏览器授权..."
     do_login

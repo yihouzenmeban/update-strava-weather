@@ -178,8 +178,7 @@ for i, a in enumerate(trails, 1):
     if wb_pos == -1 or sb_pos == -1 or sb_pos < wb_pos:
         continue
 
-    # 目标顺序：备注 → summitbag → 天气块
-    # 把描述拆成三段：备注（天气块之前的非空行）、天气块（温度: ... Powered By）、summitbag 行
+    # 目标顺序：备注 → summitbag → 天气块，其它内容和空行保持原顺序
     lines = desc.split("\n")
     wb_start = wb_end = None
     for idx, l in enumerate(lines):
@@ -191,10 +190,9 @@ for i, a in enumerate(trails, 1):
     summit_lines = [l for l in lines if SUMMIT_MARK in l]
     if wb_start is None or wb_end is None or not summit_lines:
         continue
-    # 备注段：天气块之前的非空、非 summitbag 行
-    note_lines = [l for l in lines[:wb_start] if l.strip() != "" and SUMMIT_MARK not in l]
-    weather_lines = lines[wb_start:wb_end + 1]
-    new_desc = "\n".join(note_lines + summit_lines + weather_lines)
+    # summitbag 已确认位于天气块之后，移除后插到天气块起始位置即可
+    other_lines = [l for l in lines if SUMMIT_MARK not in l]
+    new_desc = "\n".join(other_lines[:wb_start] + summit_lines + other_lines[wb_start:])
     if new_desc == desc:
         continue
     changes.append({"id": aid, "name": detail.get("name", ""), "before": desc, "after": new_desc})
