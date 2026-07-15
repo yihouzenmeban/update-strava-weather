@@ -206,6 +206,17 @@ act = json.load(open(sys.argv[1], encoding="utf-8"))
 if "id" not in act:
     print("❌ 拉取活动失败:", json.dumps(act, ensure_ascii=False)[:300]); sys.exit(1)
 
+# 跑步机等室内活动没有真实户外天气，跳过天气标注
+# 判定：trainer=true（ treadmill ）或 sport_type 为 Virtual* 系列
+# FORCE=1 可强制处理（用于清理之前误标的跑步机活动）
+sport_type = act.get("sport_type", "") or ""
+is_trainer = bool(act.get("trainer", False))
+is_virtual = sport_type.startswith("Virtual")
+if (is_trainer or is_virtual) and os.environ.get("FORCE", "") != "1":
+    print(f"⏭️ 跳过跑步机/室内活动（sport_type={sport_type}, trainer={is_trainer}），不更新天气")
+    print("   如需清理已误标的旧天气标注，请加 FORCE=1")
+    sys.exit(2)
+
 name = act.get("name", "") or ""
 desc = act.get("description", "") or ""
 emoji = os.environ["WEATHER_EMOJI"].strip()

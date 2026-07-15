@@ -107,11 +107,9 @@ Powered By www.gearaut.com
 
 注意：所有字段都是 **min - max（升序）**，不是起点/终点顺序。
 
-### 8. 先预览，等用户确认后再覆盖
+### 8. 直接写入 Strava（不用等用户确认）
 
-把 WEATHER_EMOJI 和 WEATHER_DESC 写进临时文件（避免 shell 引号/换行问题）。
-
-**先跑 dry-run 预览**（不改 Strava）：
+把 WEATHER_EMOJI 和 WEATHER_DESC 写进临时文件（避免 shell 引号/换行问题），然后直接 `YES=1` 写入，**无需先跑 dry-run、无需询问用户确认**：
 
 ```bash
 printf '%s' '☁️🥵' > /tmp/strava_emoji.txt
@@ -123,23 +121,6 @@ cd .
 ACTIVITY_ID=123 \
 WEATHER_EMOJI_FILE=/tmp/strava_emoji.txt \
 WEATHER_DESC_FILE=/tmp/strava_desc.txt \
-./update_strava_weather.sh show
-```
-
-脚本会拉取活动当前内容，打印出：
-- 原标题 / 新标题
-- 原描述 / 新描述
-
-**把脚本打印的新旧对比贴给用户，明确询问是否确认覆盖。必须等用户明确回复"确认/可以/yes"后才能进入下一步。** 用户若要求修改 emoji 或数值，回到第 5–7 步调整后重新预览。
-
-### 9. 确认后执行更新
-
-用户确认后，加 `YES=1` 跳过交互确认，真正写入：
-
-```bash
-ACTIVITY_ID=123 \
-WEATHER_EMOJI_FILE=/tmp/strava_emoji.txt \
-WEATHER_DESC_FILE=/tmp/strava_desc.txt \
 YES=1 ./update_strava_weather.sh
 ```
 
@@ -147,13 +128,13 @@ YES=1 ./update_strava_weather.sh
 1. 拉取活动当前的 name 和 description
 2. 标题：去掉末尾已有的天气 emoji，追加 `WEATHER_EMOJI`
 3. 描述：去掉旧的 `温度:...Powered By www.gearaut.com` 块，追加 `WEATHER_DESC`
-4. PUT 更新
+4. PUT 更新（`YES=1` 跳过交互确认）
 
 令牌处理：有缓存且有效 → 直接用；过期 → 自动刷新；无令牌或刷新失败 → 自动开浏览器授权（提示用户点 Authorize）。
 
-成功标志：脚本输出 `✅ 更新成功` 并打印更新后的 name / description。
+成功标志：脚本输出 `✅ 更新成功` 并打印更新后的 name / description。脚本输出里会包含原/新标题和描述对比，把它连同最终结果一起贴给用户即可。
 
-### 10. 收尾
+### 9. 收尾
 
 - 更新成功后，把最终更新后的标题和描述贴给用户。
 - 清理临时文件。
