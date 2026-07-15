@@ -7,8 +7,6 @@ description: 拉取最新一次 Strava 活动，按活动时间/地点查询天�
 
 把最新一次 Strava 活动补上 gearaut 风格的天气标题和描述。流程：MCP 拉活动 → open-meteo 拉天气 → 按规则生成标题/描述 → 本地脚本更新。
 
-仓库根目录：`.`
-
 ## 前置条件
 
 - Strava MCP 已连接（只读，能拉本人活动）。
@@ -117,7 +115,6 @@ printf '%s' '温度: 25.25°C - 27.39°C  体感温度: 29.59°C - 31.53°C
 湿度: 82.83% - 70.38%  风速: 3.58 km/h - 2.81 km/h
 Powered By www.gearaut.com' > /tmp/strava_desc.txt
 
-cd .
 ACTIVITY_ID=123 \
 WEATHER_EMOJI_FILE=/tmp/strava_emoji.txt \
 WEATHER_DESC_FILE=/tmp/strava_desc.txt \
