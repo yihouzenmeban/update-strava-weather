@@ -1,4 +1,4 @@
-# updateStravaWeather
+# update-strava-weather
 
 给 Strava 活动追加 gearaut 风格的天气标注（标题加天气 emoji，描述加温度/体感/湿度/风速块）。
 
@@ -16,12 +16,12 @@
 ## 目录结构
 
 ```
-updateStravaWeather/
+update-strava-weather/
 ├── update_strava_weather.sh        主脚本
 ├── strava_config.example.sh        配置模板（提交）
 ├── strava_config.sh                真实密钥（gitignore）
 ├── .strava_tokens.json             令牌缓存（gitignore，自动生成）
-├── .claude/skills/strava-weather-update.md   AI skill
+├── .claude/skills/strava-weather-update/SKILL.md   AI skill
 ├── .gitignore
 └── README.md
 ```
@@ -84,7 +84,7 @@ Powered By www.gearaut.com
 
 ## AI Skill
 
-`.claude/skills/strava-weather-update.md` 提供端到端流程：MCP 拉活动 → open-meteo 查天气 → 插值 min/max → AI 选 emoji → 预览确认 → 写入。在本仓库目录下对 Claude 说"更新我最新活动的天气"即可触发。
+`.claude/skills/strava-weather-update/SKILL.md` 提供端到端流程：MCP 拉活动 → open-meteo 查天气 → 插值 min/max → AI 选 emoji → 预览确认 → 写入。在本仓库目录下对 Claude 说"更新我最新活动的天气"即可触发。
 
 ## 注意
 
