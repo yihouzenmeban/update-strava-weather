@@ -8,6 +8,8 @@
 #   即"追加"而非"覆盖"。
 #
 # 用法：
+#   自动补齐最新活动天气（已处理的活动自动跳过）：./update_strava_weather.sh sync
+#   预览：./update_strava_weather.sh sync --dry-run；重算：sync --force
 #   1) 首次：复制 strava_config.example.sh 为 strava_config.sh，填好 CLIENT_ID / CLIENT_SECRET；
 #      确认 Strava 应用 Authorization Callback Domain = localhost；然后运行：
 #        ./update_strava_weather.sh login
@@ -16,7 +18,7 @@
 #   3) 更新（会先打印新旧对比，再问 [y/N] 确认）：
 #        ACTIVITY_ID=xxx WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/desc.txt ./update_strava_weather.sh
 #   环境变量：
-#     ACTIVITY_ID            必填，要更新的活动 ID
+#     ACTIVITY_ID            手动更新/get/streams 必填；sync 用 --activity-id 指定活动
 #     WEATHER_EMOJI          追加到标题的 emoji（可空，或用 WEATHER_EMOJI_FILE 指定文件）
 #     WEATHER_DESC           追加到描述的天气块（可空，或用 WEATHER_DESC_FILE 指定文件）
 #     DRY_RUN=1              仅预览不更新（等同 show 子命令）
@@ -119,6 +121,14 @@ print("✅ 已刷新")
   return 0
 }
 
+require_token() {
+  if ensure_token; then
+    return 0
+  fi
+  [[ "${STRAVA_NONINTERACTIVE:-}" != "1" ]] || die "请先运行 ./update_strava_weather.sh login 完成授权，再重试 sync"
+  do_login
+}
+
 # 只读 API 用子 shell 管理临时文件，不影响更新命令的 EXIT trap。
 do_read() (
   local endpoint
@@ -135,9 +145,7 @@ do_read() (
       ;;
   esac
 
-  if ! ensure_token >&2; then
-    do_login >&2
-  fi
+  require_token >&2
   local access response_file code
   access=$(token_field access_token)
   response_file=$(mktemp "${TMPDIR:-/tmp}/strava-read.XXXXXX")
@@ -166,10 +174,7 @@ PY
 do_update() (
   [[ "${ACTIVITY_ID:-}" =~ ^[1-9][0-9]*$ ]] || die "请通过环境变量 ACTIVITY_ID 指定有效的活动 ID（正整数）"
 
-  if ! ensure_token; then
-    echo "→ 启动浏览器授权..."
-    do_login
-  fi
+  require_token
   local access work_dir body_file code
   access=$(token_field access_token)
   work_dir=$(mktemp -d "${TMPDIR:-/tmp}/strava-weather.XXXXXX")
@@ -184,7 +189,7 @@ do_update() (
 
   # 2) 计算追加后的 name / description，写到 body 文件
   WEATHER_EMOJI="$WEATHER_EMOJI" WEATHER_DESC="$WEATHER_DESC" \
-    python3 - "$work_dir/activity.json" "$body_file" <<'PY'
+    python3 - "$work_dir/activity.json" "$body_file" "$SCRIPT_DIR" <<'PY'
 import json, sys, os, re
 
 act = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -204,6 +209,12 @@ if (is_trainer or is_virtual) and os.environ.get("FORCE", "") != "1":
 
 name = act.get("name", "") or ""
 desc = act.get("description", "") or ""
+if os.environ.get("STRAVA_SYNC_CHECK_WEATHER") == "1":
+    sys.path.insert(0, sys.argv[3])
+    from strava_sync import has_weather
+    if has_weather(desc):
+        print("⏭️ 活动已补上天气，保留最新内容，不重复写入")
+        sys.exit(3)
 emoji = os.environ["WEATHER_EMOJI"].strip()
 block = os.environ["WEATHER_DESC"].strip()
 
@@ -250,10 +261,10 @@ PY
   check_api_status "$code"
 
   echo "→ HTTP 状态码: $code"
-  python3 - "$work_dir/response.json" <<'PY'
+  python3 - "$work_dir/response.json" "$ACTIVITY_ID" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1]))
-if "id" in d:
+if str(d.get("id")) == sys.argv[2]:
     print("✅ 更新成功")
     print("  name       :",d.get("name"))
     print("  description:",d.get("description"))
@@ -266,6 +277,7 @@ PY
 # ====== 入口 ======
 check_config
 case "${1:-run}" in
+  sync) shift; python3 "$SCRIPT_DIR/strava_sync.py" "$@" ;;
   login) do_login ;;
   auth)
     [[ $# -eq 1 ]] || die "用法: $0 auth（从标准输入读取授权码，不接受命令行参数）"
@@ -277,5 +289,5 @@ case "${1:-run}" in
   list|get|streams) do_read "$1" "${2:-}" ;;
   show) DRY_RUN=1 do_update ;;
   run|"") do_update ;;
-  *) die "未知命令: $1（可用: login / auth / list [数量] / get / streams / show / 不带参数直接运行）" ;;
+  *) die "未知命令: $1（可用: sync / login / auth / list [数量] / get / streams / show / 不带参数直接运行）" ;;
 esac

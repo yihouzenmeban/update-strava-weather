@@ -5,6 +5,8 @@ strava_config.sh.*
 # Strava 令牌缓存（含 access/refresh token，敏感）
 .strava_tokens.json
 .strava_tokens.*
+.strava_weather_state.*
+.strava_weather_sync.log*
 .env
 .env.*
 

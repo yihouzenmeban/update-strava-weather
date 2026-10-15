@@ -241,11 +241,13 @@ case "${1:-all}" in
   reorder) test_reorder_preserves_trailing_text ;;
   read) test_read_commands ;;
   security) python3 "$ROOT_DIR/tests/security.py" ;;
+  sync) python3 "$ROOT_DIR/tests/sync.py" ;;
   all)
     test_auth_does_not_require_activity_id
     test_reorder_preserves_trailing_text
     test_read_commands
     python3 "$ROOT_DIR/tests/security.py"
+    python3 "$ROOT_DIR/tests/sync.py"
     ;;
   *) fail "unknown test: $1" ;;
 esac
