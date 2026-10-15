@@ -13,6 +13,7 @@ description: 通过本地脚本直接调用 Strava API 拉取活动，按活动�
 - 本地可用 Bash、curl 和 Python 3。在仓库根目录执行下列命令，无需 Strava MCP。
 - 脚本首次运行会自动开浏览器授权（`activity:read_all,activity:write`）、缓存令牌到 `.strava_tokens.json`，之后自动刷新。读写均复用这套授权，不要读取或输出配置中的密钥、令牌。
 - `list`、`get`、`streams` 成功时标准输出只有 API JSON；授权和刷新提示写到标准错误。命令失败时先处理错误，不继续计算或写入天气。
+- 下列示例的 `123` 为虚构活动 ID，执行前必须替换为本次查询返回或用户指定的 ID。授权优先使用 `login`；手动 `auth` 从标准输入读取授权码，不将凭据放进命令行参数。
 
 ## 执行步骤
 
@@ -132,15 +133,20 @@ Powered By www.gearaut.com
 把 WEATHER_EMOJI 和 WEATHER_DESC 写进临时文件（避免 shell 引号/换行问题），然后直接 `YES=1` 写入，**无需先跑 dry-run、无需询问用户确认**：
 
 ```bash
-printf '%s' '☁️🥵' > /tmp/strava_emoji.txt
+(
+umask 077
+weather_dir=$(mktemp -d "${TMPDIR:-/tmp}/strava-weather-input.XXXXXX")
+trap 'rm -rf "$weather_dir"' EXIT
+printf '%s' '☁️🥵' > "$weather_dir/emoji.txt"
 printf '%s' '温度: 25.25°C - 27.39°C  体感温度: 29.59°C - 31.53°C
 湿度: 82.83% - 70.38%  风速: 3.58 km/h - 2.81 km/h
-Powered By www.gearaut.com' > /tmp/strava_desc.txt
+Powered By www.gearaut.com' > "$weather_dir/description.txt"
 
 ACTIVITY_ID=123 \
-WEATHER_EMOJI_FILE=/tmp/strava_emoji.txt \
-WEATHER_DESC_FILE=/tmp/strava_desc.txt \
+WEATHER_EMOJI_FILE="$weather_dir/emoji.txt" \
+WEATHER_DESC_FILE="$weather_dir/description.txt" \
 YES=1 ./update_strava_weather.sh
+)
 ```
 
 脚本流程：

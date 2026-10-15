@@ -15,18 +15,11 @@
 # 依赖同目录 strava_config.sh（CLIENT_ID/CLIENT_SECRET）和 .strava_tokens.json
 # （由 update_strava_weather.sh login 生成）。
 
+set +x
 set -euo pipefail
-
-# ====== 配置区 ======
-CONFIG_FILE="$(dirname "$0")/strava_config.sh"
-if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck source=strava_config.sh
-  source "$CONFIG_FILE"
-fi
-TOKEN_FILE="$(dirname "$0")/.strava_tokens.json"
-# ====================
-
-die() { echo "❌ $*" >&2; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=strava_common.sh
+source "$SCRIPT_DIR/strava_common.sh"
 
 if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
   die "请先创建 strava_config.sh 并填好 CLIENT_ID"
@@ -35,21 +28,6 @@ if [[ -z "${CLIENT_SECRET:-}" || "$CLIENT_SECRET" == *"在这里粘贴"* ]]; the
   die "请先创建 strava_config.sh 并填好 CLIENT_SECRET"
 fi
 [[ -f "$TOKEN_FILE" ]] || die "没有令牌缓存 $TOKEN_FILE，请先跑 ./update_strava_weather.sh login 授权"
-
-# 读缓存里的某个字段
-token_field() { python3 -c "import json,sys;print(json.load(open('$TOKEN_FILE')).get('$1',''))"; }
-
-# 保存刷新后的令牌
-save_tokens() {
-  NEW="$NEW" python3 - "$TOKEN_FILE" <<'PY'
-import json, sys, os
-new = json.loads(os.environ["NEW"])
-path = sys.argv[1]
-d = json.load(open(path)) if os.path.exists(path) else {}
-d.update({k: new[k] for k in ("access_token","refresh_token","expires_at","scope") if k in new})
-json.dump(d, open(path, "w"), ensure_ascii=False, indent=2)
-PY
-}
 
 # 确保拿到未过期的 access_token：有效直接用，过期就刷新；刷新失败提示重新授权
 ensure_token() {
@@ -67,11 +45,7 @@ ensure_token() {
 
   echo "→ 令牌已过期，刷新中..."
   local resp
-  resp=$(curl -s -X POST "https://www.strava.com/oauth/token" \
-    -d "client_id=${CLIENT_ID}" \
-    -d "client_secret=${CLIENT_SECRET}" \
-    -d "refresh_token=${refresh}" \
-    -d "grant_type=refresh_token")
+  resp=$(oauth_token_request refresh_token "$refresh")
   if ! echo "$resp" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -93,7 +67,7 @@ YES="${YES:-}"
 DRY_RUN="${DRY_RUN:-}"
 # 默认仅预览；YES=1 才写入
 APPLY=0
-[[ "$YES" == "1" ]] && APPLY=1
+[[ "$YES" == "1" && "$DRY_RUN" != "1" ]] && APPLY=1
 
 ACCESS="$ACCESS" APPLY="$APPLY" python3 - <<'PY'
 import json, os, sys, time, urllib.request, urllib.error

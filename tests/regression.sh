@@ -17,7 +17,7 @@ test_auth_does_not_require_activity_id() {
   local rc
 
   mkdir -p "$work_dir"
-  cp "$ROOT_DIR/update_strava_weather.sh" "$work_dir/"
+  cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
   cat > "$work_dir/strava_config.sh" <<'EOF'
 CLIENT_ID="test-client-id"
 CLIENT_SECRET="test-client-secret"
@@ -29,7 +29,7 @@ EOF
   set -e
 
   [[ $rc -ne 0 ]] || fail "auth without a code should fail"
-  [[ "$output" == *"auth <code>"* ]] || fail "auth was blocked by the ACTIVITY_ID check"
+  [[ "$output" == *"用法:"*"auth"* ]] || fail "auth was blocked by the ACTIVITY_ID check"
   echo "PASS: auth does not require ACTIVITY_ID"
 }
 
@@ -39,7 +39,7 @@ test_reorder_preserves_trailing_text() {
   local occurrences
 
   mkdir -p "$work_dir"
-  cp "$ROOT_DIR/reorder_summitbag.sh" "$work_dir/"
+  cp "$ROOT_DIR/reorder_summitbag.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
   cat > "$work_dir/strava_config.sh" <<'EOF'
 CLIENT_ID="test-client-id"
 CLIENT_SECRET="test-client-secret"
@@ -95,7 +95,7 @@ PY
 test_read_commands() {
   local work_dir="$TMP_DIR/read"
   mkdir -p "$work_dir/bin"
-  cp "$ROOT_DIR/update_strava_weather.sh" "$work_dir/"
+  cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
   cat > "$work_dir/strava_config.sh" <<'EOF'
 CLIENT_ID="test-client-id"
 CLIENT_SECRET="test-client-secret"
@@ -109,8 +109,10 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs
 
 args = sys.argv[1:]
+input_data = sys.stdin.read()
 url = next(arg for arg in args if arg.startswith("https://"))
 method = args[args.index("-X") + 1] if "-X" in args else "GET"
 with open("requests.jsonl", "a") as log:
@@ -118,16 +120,17 @@ with open("requests.jsonl", "a") as log:
 
 if url.endswith("/oauth/token"):
     assert method == "POST"
-    assert "grant_type=refresh_token" in args
-    assert "refresh_token=test-refresh-token" in args
+    form = parse_qs(input_data)
+    assert form["grant_type"] == ["refresh_token"]
+    assert form["refresh_token"] == ["test-refresh-token"]
     print(json.dumps({"access_token": "refreshed-access-token",
                       "refresh_token": "refreshed-refresh-token",
                       "expires_at": 4102444800}))
     sys.exit(0)
 
 assert method == "GET", "read command must use GET"
-assert "-H" in args
-assert args[args.index("-H") + 1] == "Authorization: Bearer " + os.environ.get(
+assert args[args.index("--header") + 1] == "@-"
+assert input_data.strip() == "Authorization: Bearer " + os.environ.get(
     "EXPECTED_ACCESS", "test-access-token")
 mode = os.environ.get("FAKE_MODE", "ok")
 if mode == "network":
@@ -237,10 +240,12 @@ case "${1:-all}" in
   auth) test_auth_does_not_require_activity_id ;;
   reorder) test_reorder_preserves_trailing_text ;;
   read) test_read_commands ;;
+  security) python3 "$ROOT_DIR/tests/security.py" ;;
   all)
     test_auth_does_not_require_activity_id
     test_reorder_preserves_trailing_text
     test_read_commands
+    python3 "$ROOT_DIR/tests/security.py"
     ;;
   *) fail "unknown test: $1" ;;
 esac
