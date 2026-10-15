@@ -7,7 +7,7 @@
 ## 特性
 
 - 一站式：OAuth 授权 / 令牌自动刷新 / 拉取活动 / 追加天气 / 更新
-- `sync` 一次完成检查、查天气和写入；缓存命中后只查一次活动列表，省去 AI 分步编排
+- `sync` 分页发现新增活动并重试积压任务，按 ID 跳过已完成活动的详情和天气查询，省去 AI 分步编排
 - 标题：按 weather_code、当地时段和极值生成 emoji（🌞⛅☁️🌫️🌧️❄️⛈️🌙），体感 >30 加 🥵、<0 加 🥶，风速 >30 km/h 加 💨
 - 描述：活动时段内各字段的 min - max（升序），保留 2 位小数
 - 数据源：open-meteo（近期活动用 15 分钟 `minutely_15`，历史活动用 archive hourly）
@@ -25,7 +25,7 @@ update-strava-weather/
 ├── strava_config.example.sh        配置模板（提交）
 ├── strava_config.sh                真实密钥（gitignore）
 ├── .strava_tokens.json             令牌缓存（gitignore，自动生成）
-├── .strava_weather_state.json      最近 128 条处理记录（gitignore，自动生成）
+├── .strava_weather_state.json      扫描进度、处理记录和待处理队列（gitignore，自动生成）
 ├── .claude/skills/strava-weather-update/SKILL.md   AI skill
 ├── .gitignore
 └── README.md
@@ -51,7 +51,7 @@ update-strava-weather/
 
 以下 `123` 为虚构活动 ID，`/path/to/desc.txt` 为天气描述文件占位路径，使用时替换为实际值。描述文件应放在私有目录并设为 `600` 权限。
 
-推荐直接同步最新一次活动：
+推荐批量同步新增活动及上次失败的任务：
 
 ```bash
 ./update_strava_weather.sh sync
@@ -59,16 +59,30 @@ update-strava-weather/
 # 只预览，不写活动和处理记录
 ./update_strava_weather.sh sync --dry-run
 
-# 忽略处理记录和已有天气，强制重算；室内活动仍跳过
-./update_strava_weather.sh sync --force
+# 指定一条活动强制重算；室内活动仍跳过
+./update_strava_weather.sh sync --activity-id 123 --force
+
+# 按 UTC 日期补扫，包含起止当天；未结束的日期只查到本轮开始时刻
+./update_strava_weather.sh sync --since 2026-10-01 --until 2026-10-15
+
+# 补扫全部历史，已有完整天气和已完成活动仍跳过
+./update_strava_weather.sh sync --all
 
 # 指定活动时不查列表；无 GPS 时可同时提供经纬度
 ./update_strava_weather.sh sync --activity-id 123 --latitude 39.9 --longitude 116.4
 ```
 
-`sync` 默认直接补齐缺失天气。它只处理最新一次活动：先查列表，命中本地记录就结束；未命中时读取详情，已有完整天气块或属于室内活动则跳过并记录。需要补天气时使用起点坐标（缺少时获取轨迹流），自动插值、生成 emoji 和描述，再通过原更新流程读取最新描述并写入，保留其它备注和 summitbag。
+`sync` 默认直接补齐缺失天气。首次扫描最近 7 天；之后从“上次完整扫描时间往前 7 天”查到本轮开始时刻，因此停用一段时间后也会覆盖整个停用期间。每页默认 50 条，可用 `--page-size 1–200` 调整；分页参数固定本轮时间上限，按 ID 去重，不会遇到已处理活动就提前停止。通常少量活动只需要一次列表请求，已完成的 ID 不再请求详情和天气。
 
-成功更新、已有天气、室内跳过均记录；失败、空列表及预览不记录。计算期间如果其它工具已补上天气，写入前会再次检查并保留它。记录和并发锁权限为 `600`，同一仓库同时只能运行一个 `sync`。手动删除天气后请用 `--force` 重算；处理记录损坏时会报错，可在没有 sync 运行时移走 `.strava_weather_state.json` 后重新检查。
+发现的待处理 ID 每页先落盘，完整扫描后才推进扫描进度，再逐条处理队列。成功更新、已有完整天气和室内活动均立即记录完成；普通单条失败保留队列并继续其它活动，即使失败活动已不在下次查询范围内也会重试。遇到授权失败或 429 时停止本轮，保留尚未处理的 ID。部分失败时命令返回非零退出码，并报告完成、失败和剩余数量。
+
+分页失败或首次扫描中断会保留原查询起点，不把未扫描范围当作完成；再次运行默认 `sync` 会覆盖原范围。空列表仍更新完整扫描时间。`--dry-run` 或 `DRY_RUN=1` 不写活动、队列、处理结果或扫描进度。
+
+活动时间早于重叠范围的补传活动可能无法被默认扫描发现，请用 `--since` / `--until` 或 `--all` 补扫。显式日期范围和单个 ID 只处理所选活动，不处理范围外的积压，也不改变默认扫描进度；历史补扫分页失败后应重跑同一补扫命令。`--force` 重算本次查询范围内的活动，其强制重算标记会随失败任务保留到下次重试。
+
+需要补天气时使用起点坐标（缺少时获取轨迹流），自动插值、生成 emoji 和描述，再通过原更新流程读取最新描述并写入，保留其它备注和 summitbag；计算期间如果其它工具已补上天气，写入前会再次检查并保留它。经纬度覆盖参数只允许配合 `--activity-id`，避免把同一地点用于不同活动。
+
+旧版处理记录自动迁移到新格式，保留已有完成结果；新版不再只保留最后 128 条，以免大批历史补扫重复工作。记录和并发锁权限为 `600`，同一仓库同时只能运行一个 `sync`。手动删除天气后请指定 ID 加 `--force` 重算。记录损坏时会报错，不会自动清空；在没有 sync 运行时可先私有备份再移走记录，随后重新补扫，但原队列和扫描进度不会自动恢复。
 
 天气取值沿用活动开始时间加 `moving_time` 的区间，包含区间内采样点及首尾插值。天气请求统一用 UTC 时间戳，emoji 的夜间判断使用 `start_date_local` 的当地钟表时间，避免重复换算时区。近期活动用 forecast `minutely_15`，超过 5 天用 archive `hourly`，不会对缺失数据外推。
 
@@ -114,7 +128,7 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 ```
 
 子命令：
-- `sync [--force] [--dry-run] [--activity-id ID] [--latitude LAT --longitude LNG]` — 自动补齐天气并记录处理结果
+- `sync [--activity-id ID | --since DATE [--until DATE] | --all] [--page-size N] [--force] [--dry-run]` — 批量增量同步或历史补扫
 - `login` — 浏览器授权换令牌
 - `auth` — 从标准输入读取授权码并换令牌；终端输入不回显，避免写进命令行参数和历史
 - `list [数量]` — 获取最近的活动，默认 1 条，最多 200 条（`GET /athlete/activities`）
@@ -125,6 +139,7 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 
 环境变量：
 - `ACTIVITY_ID`（`get` / `streams` / 更新时必填）活动 ID
+- `STRAVA_PAGE` / `STRAVA_AFTER` / `STRAVA_BEFORE` — `list` 的页码、开始和结束 Unix 时间戳，后两者为 API 原始排除边界
 - `WEATHER_EMOJI` / `WEATHER_EMOJI_FILE` 追加到标题的 emoji
 - `WEATHER_DESC` / `WEATHER_DESC_FILE` 追加到描述的天气块
 - `DRY_RUN=1` 仅预览

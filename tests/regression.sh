@@ -158,13 +158,14 @@ PY
   (
     cd "$work_dir"
     export PATH="$work_dir/bin:$PATH"
-    unset ACTIVITY_ID
+    unset ACTIVITY_ID STRAVA_PAGE STRAVA_AFTER STRAVA_BEFORE
 
     ./update_strava_weather.sh list > list.json 2> stderr.txt
     ./update_strava_weather.sh list 5 > list-five.json 2> stderr.txt
     ACTIVITY_ID=123 ./update_strava_weather.sh get > activity.json 2> stderr.txt
     ACTIVITY_ID=123 ./update_strava_weather.sh streams > streams.json 2> stderr.txt
     FAKE_MODE=empty ./update_strava_weather.sh list > empty.json 2> stderr.txt
+    STRAVA_PAGE=3 STRAVA_AFTER=100 STRAVA_BEFORE=200 ./update_strava_weather.sh list 50 > page.json 2> stderr.txt
     python3 - <<'PY'
 import json
 from pathlib import Path
@@ -176,6 +177,7 @@ assert json.loads(Path("empty.json").read_text()) == []
 requests = [json.loads(line) for line in Path("requests.jsonl").read_text().splitlines()]
 assert requests[0]["url"].endswith("/athlete/activities?page=1&per_page=1")
 assert requests[1]["url"].endswith("/athlete/activities?page=1&per_page=5")
+assert requests[-1]["url"].endswith("/athlete/activities?page=3&per_page=50&after=100&before=200")
 PY
     echo "PASS: read commands return API JSON with the expected endpoints"
 
@@ -228,6 +230,14 @@ PY
       for activity_id in '' abc '123?bad=1'; do
         if ACTIVITY_ID="$activity_id" ./update_strava_weather.sh "$command" > failed.json 2> stderr.txt; then
           fail "$command should reject invalid ACTIVITY_ID"
+        fi
+      done
+    done
+    local variable value
+    for variable in STRAVA_PAGE STRAVA_AFTER STRAVA_BEFORE; do
+      for value in -1 '1&bad=1'; do
+        if env "$variable=$value" ./update_strava_weather.sh list > failed.json 2> stderr.txt; then
+          fail "list should reject $variable=$value"
         fi
       done
     done

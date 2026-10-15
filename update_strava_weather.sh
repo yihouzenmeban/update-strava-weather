@@ -8,8 +8,9 @@
 #   即"追加"而非"覆盖"。
 #
 # 用法：
-#   自动补齐最新活动天气（已处理的活动自动跳过）：./update_strava_weather.sh sync
+#   批量补齐新增和待重试活动的天气：./update_strava_weather.sh sync
 #   预览：./update_strava_weather.sh sync --dry-run；重算：sync --force
+#   历史补扫：sync --since YYYY-MM-DD --until YYYY-MM-DD；全部历史：sync --all
 #   1) 首次：复制 strava_config.example.sh 为 strava_config.sh，填好 CLIENT_ID / CLIENT_SECRET；
 #      确认 Strava 应用 Authorization Callback Domain = localhost；然后运行：
 #        ./update_strava_weather.sh login
@@ -27,6 +28,7 @@
 # 也可以手动拿 code 后运行 ./update_strava_weather.sh auth，从标准输入提供授权码。
 # 只读 API（stdout 为 JSON，授权/刷新提示写 stderr）：
 #   ./update_strava_weather.sh list [数量]（默认 1）
+#     可用 STRAVA_PAGE / STRAVA_AFTER / STRAVA_BEFORE 指定页码和 Unix 时间戳范围
 #   ACTIVITY_ID=xxx ./update_strava_weather.sh get
 #   ACTIVITY_ID=xxx ./update_strava_weather.sh streams（坐标流）
 
@@ -136,7 +138,17 @@ do_read() (
     list)
       local count="${2:-1}"
       [[ "$count" =~ ^[1-9][0-9]{0,2}$ ]] && (( count <= 200 )) || die "活动数量必须为 1–200 的整数"
-      endpoint="athlete/activities?page=1&per_page=${count}"
+      local page="${STRAVA_PAGE:-1}"
+      [[ "$page" =~ ^[1-9][0-9]{0,8}$ ]] || die "STRAVA_PAGE 必须为正整数"
+      endpoint="athlete/activities?page=${page}&per_page=${count}"
+      if [[ -n "${STRAVA_AFTER:-}" ]]; then
+        [[ "$STRAVA_AFTER" =~ ^[0-9]{1,12}$ ]] || die "STRAVA_AFTER 必须为非负整数时间戳"
+        endpoint+="&after=${STRAVA_AFTER}"
+      fi
+      if [[ -n "${STRAVA_BEFORE:-}" ]]; then
+        [[ "$STRAVA_BEFORE" =~ ^[0-9]{1,12}$ ]] || die "STRAVA_BEFORE 必须为非负整数时间戳"
+        endpoint+="&before=${STRAVA_BEFORE}"
+      fi
       ;;
     get|streams)
       [[ "${ACTIVITY_ID:-}" =~ ^[1-9][0-9]*$ ]] || die "请通过环境变量 ACTIVITY_ID 指定有效的活动 ID（正整数）"

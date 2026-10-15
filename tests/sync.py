@@ -22,8 +22,10 @@ BLOCK = ("温度: 20.00°C - 22.00°C  体感温度: 30.00°C - 32.00°C\n"
          "湿度: 60.00% - 70.00%  风速: 3.00 km/h - 5.00 km/h\nPowered By www.gearaut.com")
 
 CURL_MOCK = r'''#!/usr/bin/env python3
+import datetime as dt
 import json, sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 args = sys.argv[1:]
 assert sys.stdin.read().strip() == "Authorization: Bearer test-access-token"
 url = next(arg for arg in args if arg.startswith("https://"))
@@ -34,20 +36,40 @@ log = Path("requests.jsonl")
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 entry = {"kind": "strava", "method": method, "url": url}
 status = "200"
+parsed = urlsplit(url)
+query = parse_qs(parsed.query)
+activity_id = parsed.path.split("/activities/")[-1].split("/")[0]
+dataset = scenario.get("activities", [scenario["activity"]])
+details = {str(item["id"]): item for item in dataset}
+details.update(scenario.get("details", {}))
 if method == "PUT":
     body = json.loads(Path(args[args.index("--data-binary") + 1][1:]).read_text())
     entry["body"] = body
-    status = str(scenario.get("put_status", 200))
-    payload = dict(body, id=scenario.get("put_id", 123))
+    status = str(scenario.get("put_status_by_id", {}).get(activity_id, scenario.get("put_status", 200)))
+    payload = dict(body, id=scenario.get("put_id", int(activity_id)))
 elif "/athlete/activities?" in url:
-    payload = [] if scenario.get("empty") else [scenario["activity"]]
+    page = int(query.get("page", [1])[0])
+    count = int(query.get("per_page", [1])[0])
+    status = str(scenario.get("list_status_by_page", {}).get(str(page), 200))
+    if "pages" in scenario:
+        payload = scenario["pages"][page - 1] if page <= len(scenario["pages"]) else []
+    else:
+        after = int(query.get("after", [0])[0])
+        before = int(query.get("before", [253402300799])[0])
+        dataset = [item for item in dataset if after < dt.datetime.fromisoformat(
+            item["start_date"].replace("Z", "+00:00")).timestamp() < before]
+        payload = [] if scenario.get("empty") else dataset[(page - 1) * count:page * count]
 elif "/streams?" in url:
     payload = scenario.get("streams", {"latlng": {"data": [None, [39.9, 116.4]]}})
     status = str(scenario.get("streams_status", 200))
 else:
     count = sum(entry.get("kind") == "strava" and entry.get("method") == "GET"
-                and entry["url"].endswith("/activities/123") for entry in previous)
-    payload = scenario.get("fresh", scenario["activity"]) if count else scenario["activity"]
+                and entry["url"].endswith("/activities/" + activity_id) for entry in previous)
+    activity = details[activity_id]
+    fresh = scenario.get("fresh_by_id", {}).get(activity_id, scenario.get("fresh", activity)
+            if activity_id == str(scenario["activity"]["id"]) else activity)
+    payload = fresh if count else activity
+    status = str(scenario.get("get_status_by_id", {}).get(activity_id, 200))
 Path(args[args.index("-o") + 1]).write_text(json.dumps(payload))
 with log.open("a") as output:
     output.write(json.dumps(entry) + "\n")
@@ -118,7 +140,7 @@ class SyncTests(unittest.TestCase):
         (self.directory / "scenario.json").write_text(json.dumps(self.scenario))
         return subprocess.run(["bash", "update_strava_weather.sh", "sync", *args], cwd=self.directory,
                               env=dict(self.environment, **environment), input="", text=True,
-                              capture_output=True, timeout=15)
+                              capture_output=True, timeout=30)
 
     def requests(self):
         path = self.directory / "requests.jsonl"
@@ -181,17 +203,22 @@ class SyncTests(unittest.TestCase):
                 self.state.unlink(missing_ok=True)
                 self.scenario.update(failure)
                 self.assertNotEqual(self.sync().returncode, 0)
-                self.assertFalse(self.state.exists())
+                state = json.loads(self.state.read_text())
+                self.assertNotIn("123", state["activities"])
+                self.assertIn("123", state["pending"])
                 for key in failure:
                     self.scenario.pop(key)
         self.assert_success(self.sync())
         self.assertTrue(self.state.exists())
 
-    def test_empty_activity_list_does_not_create_processed_state(self):
+    def test_empty_activity_list_advances_scan_without_completed_records(self):
         self.scenario["empty"] = True
         self.assert_success(self.sync())
         self.assertEqual(len(self.requests()), 1)
-        self.assertFalse(self.state.exists())
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["activities"], {})
+        self.assertEqual(state["pending"], {})
+        self.assertIsInstance(state["last_scan"], int)
 
     def test_coordinates_use_stream_fallback_and_allow_explicit_location(self):
         self.scenario["activity"] = dict(self.activity, start_latlng=[])
@@ -201,9 +228,9 @@ class SyncTests(unittest.TestCase):
         self.clear_requests()
         self.scenario["streams_status"] = 404
         self.assertNotEqual(self.sync().returncode, 0)
-        self.assertFalse(self.state.exists())
+        self.assertIn("123", json.loads(self.state.read_text())["pending"])
         self.clear_requests()
-        self.assert_success(self.sync("--latitude", "39.9", "--longitude", "116.4"))
+        self.assert_success(self.sync("--activity-id", "123", "--latitude", "39.9", "--longitude", "116.4"))
         self.assertFalse(any("/streams?" in entry["url"] for entry in self.requests()))
 
     def test_weather_added_during_processing_is_preserved(self):
@@ -250,7 +277,7 @@ class SyncTests(unittest.TestCase):
         result = self.sync()
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertFalse(self.state.exists())
+        self.assertIn("123", json.loads(self.state.read_text())["pending"])
 
     def test_invalid_arguments_fail_before_any_api_call(self):
         for arguments in (("--activity-id", ""), ("--activity-id", "abc"),
@@ -268,6 +295,142 @@ class SyncTests(unittest.TestCase):
                 self.assertNotEqual(self.sync().returncode, 0)
                 self.assertEqual(self.state.read_text(), content)
                 self.assertEqual(self.requests(), [])
+
+    def batch(self, *ids):
+        activities = [dict(self.activity, id=activity_id, description=BLOCK) for activity_id in ids]
+        self.scenario["activities"] = activities
+        self.scenario["details"] = {str(item["id"]): item for item in activities}
+        self.scenario["fresh_by_id"] = self.scenario["details"].copy()
+        return activities
+
+    def write_state(self, activities=None, pending=None, last_scan=None):
+        self.state.write_text(json.dumps({"version": 2, "activities": activities or {},
+                                         "pending": pending or {}, "last_scan": last_scan}))
+
+    def test_batch_pages_past_cached_activity_and_deduplicates_ids(self):
+        first, second, third = self.batch(123, 124, 125)
+        self.scenario["pages"] = [[first, second], [second, third], []]
+        self.state.write_text(json.dumps({"version": 1, "activities": {"123": "updated"}}))
+        self.assert_success(self.sync("--page-size", "2"))
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["version"], 2)
+        self.assertEqual(state["activities"], {"123": "updated", "124": "existing", "125": "existing"})
+        details = [entry for entry in self.requests() if "/activities/" in entry["url"]]
+        self.assertEqual([entry["url"].rsplit("/", 1)[-1] for entry in details], ["124", "125"])
+        pages = [parse_qs(urlsplit(entry["url"]).query) for entry in self.requests() if "/athlete/activities?" in entry["url"]]
+        self.assertEqual([page["page"][0] for page in pages], ["1", "2", "3"])
+        self.assertEqual(len({page["before"][0] for page in pages}), 1)
+
+    def test_failure_is_retried_outside_next_window_while_new_activity_completes(self):
+        self.batch(123, 124, 125)
+        self.scenario["get_status_by_id"] = {"124": 500}
+        self.assertNotEqual(self.sync().returncode, 0)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(set(state["activities"]), {"123", "125"})
+        self.assertEqual(state["pending"], {"124": False})
+        self.scenario["get_status_by_id"] = {}
+        self.scenario["activities"] = [dict(self.activity, id=126, description=BLOCK)]
+        self.clear_requests()
+        self.assert_success(self.sync())
+        state = json.loads(self.state.read_text())
+        self.assertEqual(set(state["activities"]), {"123", "124", "125", "126"})
+        self.assertEqual(state["pending"], {})
+
+    def test_scan_failure_preserves_discovered_queue_and_previous_scan_time(self):
+        self.batch(123, 124, 125)
+        previous = int(dt.datetime.now(dt.timezone.utc).timestamp()) - 86400
+        self.write_state(last_scan=previous)
+        self.scenario["list_status_by_page"] = {"2": 500}
+        self.assertNotEqual(self.sync("--page-size", "2").returncode, 0)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["last_scan"], previous)
+        self.assertEqual(set(state["pending"]), {"123", "124"})
+        self.assertEqual(state["activities"], {})
+        self.scenario["list_status_by_page"] = {}
+        self.assert_success(self.sync("--page-size", "2"))
+        state = json.loads(self.state.read_text())
+        self.assertGreater(state["last_scan"], previous)
+        self.assertEqual(set(state["activities"]), {"123", "124", "125"})
+
+    def test_default_query_covers_downtime_and_overlaps_previous_scan(self):
+        self.batch(123)
+        previous = int(dt.datetime.now(dt.timezone.utc).timestamp()) - 30 * 86400
+        self.write_state(last_scan=previous)
+        self.assert_success(self.sync())
+        query = parse_qs(urlsplit(self.requests()[0]["url"]).query)
+        self.assertEqual(int(query["after"][0]), previous - 7 * 86400 - 1)
+
+    def test_date_backfill_is_inclusive_and_does_not_advance_default_scan(self):
+        activities = self.batch(123, 124, 125)
+        start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=20)).replace(hour=0, minute=0, second=0, microsecond=0)
+        for item, offset in zip(activities, (0, 2 * 86400 - 1, 2 * 86400)):
+            item["start_date"] = (start + dt.timedelta(seconds=offset)).isoformat()
+        previous = int(dt.datetime.now(dt.timezone.utc).timestamp()) - 86400
+        self.write_state(pending={"999": False}, last_scan=previous)
+        self.assert_success(self.sync("--since", start.date().isoformat(), "--until", (start + dt.timedelta(days=1)).date().isoformat()))
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["last_scan"], previous)
+        self.assertEqual(set(state["activities"]), {"123", "124"})
+        self.assertEqual(state["pending"], {"999": False})
+
+    def test_all_history_finds_old_uploads_outside_default_window(self):
+        activities = self.batch(123, 124)
+        activities[1]["start_date"] = "2010-01-01T00:00:00+00:00"
+        self.assert_success(self.sync())
+        self.assertEqual(set(json.loads(self.state.read_text())["activities"]), {"123"})
+        self.assert_success(self.sync("--all"))
+        self.assertEqual(set(json.loads(self.state.read_text())["activities"]), {"123", "124"})
+
+    def test_rate_limit_stops_batch_without_losing_unattempted_ids(self):
+        self.batch(123, 124, 125)
+        self.scenario["get_status_by_id"] = {"123": 429}
+        self.assertNotEqual(self.sync().returncode, 0)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(set(state["pending"]), {"123", "124", "125"})
+        self.assertEqual(state["activities"], {})
+        self.assertEqual(len(self.requests()), 2)
+
+    def test_forced_failure_retries_with_force_on_next_normal_run(self):
+        self.batch(123)
+        self.write_state(activities={"123": "existing"})
+        self.scenario["put_status"] = 500
+        self.assertNotEqual(self.sync("--force").returncode, 0)
+        self.assertEqual(json.loads(self.state.read_text())["pending"], {"123": True})
+        self.scenario.pop("put_status")
+        self.clear_requests()
+        self.assert_success(self.sync())
+        self.assertEqual(self.requests()[-1]["method"], "PUT")
+        self.assertEqual(json.loads(self.state.read_text())["pending"], {})
+
+    def test_batch_preview_preserves_scan_progress_and_queue(self):
+        self.batch(123, 124, 125)
+        self.write_state(activities={"123": "updated"}, pending={"124": False}, last_scan=10)
+        before = self.state.read_bytes()
+        self.assert_success(self.sync("--dry-run"))
+        self.assertEqual(self.state.read_bytes(), before)
+        self.assertTrue(all(entry.get("method") != "PUT" for entry in self.requests()))
+
+    def test_invalid_batch_arguments_make_no_requests(self):
+        for arguments in (("--all", "--since", "2020-01-01"), ("--until", "2020-01-01"),
+                          ("--since", "invalid"), ("--since", "2020-02-01", "--until", "2020-01-01"),
+                          ("--activity-id", "123", "--all"), ("--page-size", "0"), ("--page-size", "201"),
+                          ("--latitude", "39.9", "--longitude", "116.4")):
+            with self.subTest(arguments=arguments):
+                self.assertNotEqual(self.sync(*arguments).returncode, 0)
+                self.assertEqual(self.requests(), [])
+
+    def test_interrupted_initial_scan_keeps_original_query_start(self):
+        activities = self.batch(123)
+        now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        activities[0]["start_date"] = dt.datetime.fromtimestamp(now - 20 * 86400, dt.timezone.utc).isoformat()
+        self.write_state()
+        state = json.loads(self.state.read_text())
+        state["scan_from"] = now - 30 * 86400
+        self.state.write_text(json.dumps(state))
+        self.assert_success(self.sync())
+        query = parse_qs(urlsplit(self.requests()[0]["url"]).query)
+        self.assertEqual(int(query["after"][0]), state["scan_from"] - 1)
+        self.assertEqual(set(json.loads(self.state.read_text())["activities"]), {"123"})
 
 
 class WeatherMathTests(unittest.TestCase):
@@ -314,6 +477,42 @@ class WeatherMathTests(unittest.TestCase):
         activity["start_date_local"] = start.strftime("%Y-%m-%dT00:00:00Z")
         with patch.object(module.urllib.request, "urlopen", return_value=io.StringIO(json.dumps({"hourly": series}))):
             self.assertEqual(module.weather_annotation(activity, (39.9, 116.4))[0], "🌙💨🥶")
+
+    def test_completed_records_are_saved_before_next_activity_starts(self):
+        module = self.load_module()
+        with tempfile.TemporaryDirectory(prefix="strava-state-") as directory:
+            root = Path(directory)
+            activities = [{"id": 123}, {"id": 124}]
+            calls = []
+
+            def process(args, activity_id, completed, force):
+                durable = json.loads((root / ".strava_weather_state.json").read_text())
+                calls.append(activity_id)
+                if activity_id == "123":
+                    self.assertEqual(set(durable["pending"]), {"123", "124"})
+                    self.assertIsInstance(durable["last_scan"], int)
+                    return "existing"
+                self.assertEqual(durable["activities"], {"123": "existing"})
+                self.assertEqual(durable["pending"], {"124": False})
+                raise KeyboardInterrupt  # Simulate interruption before the next item finishes.
+
+            with patch.object(module, "ROOT", root), patch.object(module, "read_strava", return_value=activities), \
+                    patch.object(module, "process_activity", side_effect=process), patch.object(module.sys, "argv", ["sync"]):
+                with self.assertRaises(KeyboardInterrupt):
+                    module.main()
+            self.assertEqual(calls, ["123", "124"])
+            self.assertEqual(json.loads((root / ".strava_weather_state.json").read_text())["pending"], {"124": False})
+
+    def test_migration_and_save_keep_more_than_128_completed_records(self):
+        module = self.load_module()
+        with tempfile.TemporaryDirectory(prefix="strava-state-") as directory:
+            path = Path(directory) / "state.json"
+            activities = {str(value): "updated" for value in range(1, 141)}
+            path.write_text(json.dumps({"version": 1, "activities": activities}))
+            state = module.load_state(path)
+            module.save_state(path, state)
+            self.assertEqual(module.load_state(path)["activities"], activities)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

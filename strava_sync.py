@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronize weather once per activity, reusing the secure Strava shell commands."""
+"""Discover activity batches and durably synchronize missing weather."""
 
 import argparse
 from bisect import bisect_left, bisect_right
@@ -34,6 +34,10 @@ class SyncError(Exception):
     pass
 
 
+class StopBatchError(SyncError):
+    pass
+
+
 def has_weather(description):
     return bool(WEATHER_BLOCK.search(description or ""))
 
@@ -52,26 +56,35 @@ def load_state(path):
     try:
         fd = private_open(path, os.O_RDONLY)
     except FileNotFoundError:
-        return {}
+        return {"version": 2, "activities": {}, "pending": {}, "last_scan": None, "scan_from": None}
     with os.fdopen(fd, encoding="utf-8") as source:
         data = json.load(source)
     if not isinstance(data, dict):
         raise SyncError("处理记录格式错误，请检查 .strava_weather_state.json")
-    if data.get("version") != 1:
+    if type(data.get("version")) is not int or data["version"] not in (1, 2):
         raise SyncError("处理记录版本无效，请检查 .strava_weather_state.json")
     activities = data.get("activities")
     if not isinstance(activities, dict) or any(
             not re.fullmatch(r"[1-9][0-9]*", key) or status not in ("updated", "existing", "indoor")
             for key, status in activities.items()):
         raise SyncError("处理记录格式错误，请检查 .strava_weather_state.json")
-    return activities
+    if data["version"] == 1:
+        return {"version": 2, "activities": activities, "pending": {}, "last_scan": None, "scan_from": None}
+    pending = data.get("pending")
+    if (not isinstance(pending, dict) or "last_scan" not in data
+            or any(not re.fullmatch(r"[1-9][0-9]*", key) or type(force) is not bool for key, force in pending.items())
+            or any(value is not None and (type(value) is not int or value < 0)
+                   for value in (data["last_scan"], data.get("scan_from")))):
+        raise SyncError("处理记录格式错误，请检查 .strava_weather_state.json")
+    return {"version": 2, "activities": activities, "pending": pending,
+            "last_scan": data["last_scan"], "scan_from": data.get("scan_from")}
 
 
-def save_state(path, activities):
+def save_state(path, state):
     fd, temporary = tempfile.mkstemp(prefix=".strava_weather_state.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
-            json.dump({"version": 1, "activities": dict(list(activities.items())[-128:])}, output, indent=2)
+            json.dump(state, output, indent=2)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
@@ -80,22 +93,29 @@ def save_state(path, activities):
             os.unlink(temporary)
 
 
-def invoke(command, activity_id=None, extra=None):
+def invoke(command, activity_id=None, extra=None, arguments=()):
     environment = dict(os.environ, STRAVA_NONINTERACTIVE="1")
     if activity_id is not None:
         environment["ACTIVITY_ID"] = str(activity_id)
     if extra:
         environment.update(extra)
-    return subprocess.run(["bash", str(ROOT / "update_strava_weather.sh"), command],
+    return subprocess.run(["bash", str(ROOT / "update_strava_weather.sh"), command, *arguments],
                           env=environment, text=True, capture_output=True)
 
 
-def read_strava(command, activity_id=None, allow_missing=False):
-    result = invoke(command, activity_id)
+def script_error(result, fallback):
+    message = result.stderr.strip() or fallback
+    if any(marker in message for marker in ("HTTP 401", "HTTP 403", "HTTP 429", "完成授权")):
+        return StopBatchError(message)
+    return SyncError(message)
+
+
+def read_strava(command, activity_id=None, allow_missing=False, extra=None, arguments=()):
+    result = invoke(command, activity_id, extra, arguments)
     if result.returncode:
         if allow_missing and "HTTP 404" in result.stderr:
             return {}
-        raise SyncError(result.stderr.strip() or f"Strava {command} 读取失败")
+        raise script_error(result, f"Strava {command} 读取失败")
     return json.loads(result.stdout)
 
 
@@ -167,6 +187,10 @@ def weather_annotation(activity, location):
     try:
         with urllib.request.urlopen(url, timeout=30) as response:
             payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403, 429):
+            raise StopBatchError(f"Open-Meteo HTTP {error.code}，停止本轮处理，待处理记录已保留") from None
+        raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
     except (urllib.error.URLError, OSError, ValueError):
         raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
     series = payload.get(key, {}) if isinstance(payload, dict) else {}
@@ -205,22 +229,8 @@ def weather_annotation(activity, location):
     return emoji, description
 
 
-def synchronize(args, activities):
-    if args.activity_id is not None:
-        activity_id = args.activity_id
-    else:
-        latest = read_strava("list")
-        if not isinstance(latest, list):
-            raise SyncError("Strava 活动列表格式无效")
-        if not latest:
-            print("⏭️ 暂无可处理活动")
-            return None
-        if not isinstance(latest[0], dict):
-            raise SyncError("Strava 活动列表格式无效")
-        activity_id = str(latest[0].get("id", ""))
-    if not re.fullmatch(r"[1-9][0-9]*", activity_id):
-        raise SyncError("Strava 活动 ID 无效")
-    if not args.force and activity_id in activities:
+def process_activity(args, activity_id, activities, force=False):
+    if not force and activity_id in activities:
         print(f"⏭️ 活动 {activity_id} 已处理，跳过详情和天气查询")
         return None
     activity = read_strava("get", activity_id)
@@ -228,10 +238,10 @@ def synchronize(args, activities):
         raise SyncError("Strava 返回的活动与请求 ID 不一致")
     if activity.get("trainer") or str(activity.get("sport_type", "")).startswith("Virtual"):
         print(f"⏭️ 活动 {activity_id} 为室内活动，跳过")
-        return activity_id, "indoor"
-    if not args.force and has_weather(activity.get("description")):
+        return "indoor"
+    if not force and has_weather(activity.get("description")):
         print(f"⏭️ 活动 {activity_id} 已有完整天气块，跳过")
-        return activity_id, "existing"
+        return "existing"
     location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
     if location is None:
         streams = read_strava("streams", activity_id, allow_missing=True)
@@ -247,26 +257,121 @@ def synchronize(args, activities):
     emoji, description = weather_annotation(activity, location)
     extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "", "WEATHER_DESC_FILE": "",
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
-             "STRAVA_SYNC_CHECK_WEATHER": "0" if args.force else "1"}
+             "STRAVA_SYNC_CHECK_WEATHER": "0" if force else "1"}
     result = invoke("show" if args.dry_run else "run", activity_id, extra)
     if result.returncode not in (0, 2, 3):
-        raise SyncError(result.stderr.strip() or "Strava 写入失败，未记录成功")
+        raise script_error(result, "Strava 写入失败，未记录成功")
     print(result.stdout.strip())
-    return activity_id, {0: "updated", 2: "indoor", 3: "existing"}[result.returncode]
+    return {0: "updated", 2: "indoor", 3: "existing"}[result.returncode]
+
+
+def enqueue(state, activity_id, force):
+    if activity_id in state["pending"]:
+        state["pending"][activity_id] = state["pending"][activity_id] or force
+    elif force or activity_id not in state["activities"]:
+        state["pending"][activity_id] = force
+
+
+def discover(args, state, state_path, now):
+    if args.activity_id is not None:
+        enqueue(state, args.activity_id, args.force)
+        if not args.dry_run and args.activity_id in state["pending"]:
+            save_state(state_path, state)
+        return [args.activity_id] if args.activity_id in state["pending"] else []
+
+    incremental = not args.all and args.since is None
+    before = min(now, args.until_timestamp) if args.until_timestamp is not None else now
+    if args.all:
+        after = 0
+    elif args.since is not None:
+        after = args.since_timestamp
+    else:
+        if state["last_scan"] is not None and state["last_scan"] > now:
+            raise SyncError("上次扫描时间晚于当前时间，请检查系统时钟和处理记录")
+        after = state["scan_from"]
+        if after is None:
+            after = max(0, (state["last_scan"] if state["last_scan"] is not None else now) - 7 * 86400)
+        state["scan_from"] = after
+        if not args.dry_run:
+            save_state(state_path, state)
+    if after >= before:
+        raise SyncError("查询起点必须早于本轮查询上限")
+
+    page, found = 1, {}
+    while True:
+        batch = read_strava("list", arguments=(str(args.page_size),), extra={
+            "STRAVA_PAGE": str(page), "STRAVA_AFTER": str(max(0, after - 1)), "STRAVA_BEFORE": str(before),
+        })
+        if not isinstance(batch, list) or len(batch) > args.page_size:
+            raise SyncError("Strava 活动列表格式无效")
+        ids = []
+        for activity in batch:
+            activity_id = str(activity.get("id", "")) if isinstance(activity, dict) else ""
+            if not re.fullmatch(r"[1-9][0-9]*", activity_id):
+                raise SyncError("Strava 活动列表包含无效 ID，扫描进度未推进")
+            ids.append(activity_id)
+        if len(batch) == args.page_size and not any(activity_id not in found for activity_id in ids):
+            raise SyncError("Strava 分页未推进，扫描进度未推进，请稍后重试")
+        for activity_id in ids:
+            found[activity_id] = None
+            enqueue(state, activity_id, args.force)
+        if ids and not args.dry_run:
+            save_state(state_path, state)
+        if len(batch) < args.page_size:
+            break
+        page += 1
+    if incremental:
+        state["last_scan"] = before
+        state["scan_from"] = None
+        if not args.dry_run:
+            save_state(state_path, state)
+    selected = list(state["pending"]) if incremental else [activity_id for activity_id in found if activity_id in state["pending"]]
+    print(f"→ 扫描到 {len(found)} 条活动，本轮待处理 {len(selected)} 条")
+    return selected
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="批量增量同步 Strava 活动天气，失败活动保留到队列")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--activity-id", help="只处理指定活动，不查询列表")
+    scope.add_argument("--all", action="store_true", help="分页补扫全部历史")
+    scope.add_argument("--since", help="从此 UTC 日期开始补扫，格式 YYYY-MM-DD")
+    parser.add_argument("--until", help="补扫截止 UTC 日期，包含当天；需与 --since 配合")
+    parser.add_argument("--page-size", type=int, default=50, help="每页活动数，默认 50，范围 1–200")
+    parser.add_argument("--force", action="store_true", help="重算查询范围内活动，室内活动仍跳过")
+    parser.add_argument("--dry-run", action="store_true", help="只预览，不写活动、队列或扫描进度")
+    parser.add_argument("--latitude", type=float, help="指定单条活动的纬度")
+    parser.add_argument("--longitude", type=float, help="指定单条活动的经度")
+    args = parser.parse_args()
+    args.dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
+    if args.activity_id is not None and not re.fullmatch(r"[1-9][0-9]*", args.activity_id):
+        parser.error("--activity-id 必须为正整数")
+    if not 1 <= args.page_size <= 200:
+        parser.error("--page-size 必须在 1–200 之间")
+    if (args.latitude is None) != (args.longitude is None) or (
+            args.latitude is not None and (args.activity_id is None or coordinates([args.latitude, args.longitude]) is None)):
+        parser.error("经纬度必须与 --activity-id 一起使用，并同时提供有效的 --latitude 和 --longitude")
+    if args.until is not None and args.since is None:
+        parser.error("--until 需与 --since 一起使用")
+    args.since_timestamp = args.until_timestamp = None
+    try:
+        if args.since is not None:
+            since = dt.date.fromisoformat(args.since)
+            until = dt.date.fromisoformat(args.until) if args.until is not None else None
+            if until is not None and until < since:
+                raise ValueError
+            args.since_timestamp = int(dt.datetime.combine(since, dt.time.min, dt.timezone.utc).timestamp())
+            if until is not None:
+                args.until_timestamp = int(dt.datetime.combine(until + dt.timedelta(days=1), dt.time.min, dt.timezone.utc).timestamp())
+            if args.since_timestamp >= dt.datetime.now(dt.timezone.utc).timestamp():
+                raise ValueError
+    except (ValueError, OverflowError):
+        parser.error("日期范围无效：使用 YYYY-MM-DD，起点须早于当前时间，截止日期不得早于起点")
+    return args
 
 
 def main():
-    parser = argparse.ArgumentParser(description="为最新活动补充天气，已处理活动自动跳过")
-    parser.add_argument("--activity-id", help="指定活动 ID，跳过列表查询")
-    parser.add_argument("--force", action="store_true", help="忽略缓存和已有天气，重新计算；室内活动仍跳过")
-    parser.add_argument("--dry-run", action="store_true", help="仅预览，不写活动和处理记录")
-    parser.add_argument("--latitude", type=float, help="无 GPS 时指定纬度")
-    parser.add_argument("--longitude", type=float, help="无 GPS 时指定经度")
-    args = parser.parse_args()
-    args.dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
-    if (args.latitude is None) != (args.longitude is None) or (
-            args.latitude is not None and coordinates([args.latitude, args.longitude]) is None):
-        parser.error("--latitude 和 --longitude 必须同时提供，且在有效经纬度范围内")
+    args = parse_args()
     os.umask(0o077)
     try:
         fd = private_open(ROOT / ".strava_weather_state.lock", os.O_RDWR | os.O_CREAT)
@@ -277,17 +382,30 @@ def main():
                 print("⏭️ 已有 sync 正在运行，本次跳过")
                 return 0
             state_path = ROOT / ".strava_weather_state.json"
-            activities = load_state(state_path)
-            result = synchronize(args, activities)
-            if result is not None and not args.dry_run:
-                activity_id, status = result
-                activities.pop(activity_id, None)
-                activities[activity_id] = status
-                save_state(state_path, activities)
+            state = load_state(state_path)
+            selected = discover(args, state, state_path, int(dt.datetime.now(dt.timezone.utc).timestamp()))
+            completed, failures = 0, 0
+            for activity_id in selected:
+                try:
+                    status = process_activity(args, activity_id, state["activities"], state["pending"][activity_id])
+                except (SyncError, OSError, ValueError) as error:
+                    failures += 1
+                    print(f"❌ 活动 {activity_id}: {error}", file=sys.stderr)
+                    if isinstance(error, StopBatchError):
+                        break
+                    continue
+                completed += 1
+                if not args.dry_run:
+                    if status is not None:
+                        state["activities"][activity_id] = status
+                    state["pending"].pop(activity_id)
+                    save_state(state_path, state)
+            verb = "预览完成" if args.dry_run else "完成"
+            print(f"→ 本轮{verb} {completed} 条，失败 {failures} 条，待处理队列 {len(state['pending'])} 条")
+            return 1 if failures else 0
     except (SyncError, OSError, ValueError) as error:
         print(f"❌ {error}", file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":
