@@ -359,10 +359,9 @@ def weather_annotation(activity, location, provider="open-meteo"):
         emoji += "🥶"
     temperature, humidity, wind = (ranges[field] for field in ("temperature_2m", "relative_humidity_2m", "wind_speed_10m"))
     feels_like = f"  体感温度: {apparent[0]:.2f}°C - {apparent[1]:.2f}°C" if apparent else ""
-    attribution = "Powered By QWeather (www.qweather.com)" if provider == "qweather" else "Powered By www.gearaut.com"
     description = (f"温度: {temperature[0]:.2f}°C - {temperature[1]:.2f}°C{feels_like}\n"
                    f"湿度: {humidity[0]:.2f}% - {humidity[1]:.2f}%  风速: {wind[0]:.2f} km/h - {wind[1]:.2f} km/h\n"
-                   f"{attribution}")
+                   "Powered By www.gearaut.com")
     return emoji, description
 
 

@@ -172,6 +172,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("体感温度: 32.00°C - 36.00°C", body["description"])
         self.assertIn("湿度: 70.00% - 90.00%", body["description"])
         self.assertIn("风速: 5.00 km/h - 9.00 km/h", body["description"])
+        self.assertTrue(body["description"].endswith("Powered By www.gearaut.com"))
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o600)
         self.assertEqual(list(self.runtime.iterdir()), [])
         self.clear_requests()
@@ -207,7 +208,7 @@ class SyncTests(unittest.TestCase):
         body = requests[-1]["body"]
         self.assertEqual(body["name"], "晨跑 🌞")
         self.assertIn("温度: 20.50°C - 22.50°C", body["description"])
-        self.assertIn("Powered By QWeather (www.qweather.com)", body["description"])
+        self.assertTrue(body["description"].endswith("Powered By www.gearaut.com"))
         self.assertIn("体感温度: 20.78°C - 23.93°C", body["description"])
         self.assertEqual(body["description"].count("体感温度:"), 1)
         self.assertIn("https://summitbag.com/example", body["description"])
