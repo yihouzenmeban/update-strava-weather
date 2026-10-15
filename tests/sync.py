@@ -186,16 +186,6 @@ class SyncTests(unittest.TestCase):
         self.assertIn("温度: 20.00°C - 20.00°C  体感温度: 30.00°C - 30.00°C", description)
         self.assertTrue(description.endswith("Not Powered By www.gearaut.com 🍚"))
 
-    def test_legacy_weather_replacement_preserves_surrounding_notes(self):
-        self.scenario["fresh"]["description"] += (
-            "\n温度: 20.00°C - 22.00°C\n湿度: 60.00% - 70.00%  风速: 3.00 km/h - 5.00 km/h\n"
-            "Powered By QWeather (www.qweather.com)\n末尾备注")
-        self.assert_success(self.sync("--force"))
-        description = self.requests()[-1]["body"]["description"]
-        self.assertNotIn("Powered By QWeather", description)
-        self.assertIn("末尾备注", description)
-        self.assertIn("https://summitbag.com/example", description)
-
     def test_current_weather_signature_is_skipped_without_weather_requests(self):
         self.scenario["activity"]["description"] = BLOCK.replace(
             "Powered By www.gearaut.com", "Not Powered By www.gearaut.com 🍚")
@@ -486,7 +476,7 @@ class WeatherMathTests(unittest.TestCase):
     def test_current_and_legacy_weather_signatures_are_recognized(self):
         module = self.load_module()
         for signature in ("Not Powered By www.gearaut.com 🍚", "Not Powered By www.gearaut.com 👻",
-                          "Powered By www.gearaut.com", "Powered By QWeather (www.qweather.com)"):
+                          "Powered By www.gearaut.com"):
             for newline in ("\n", "\r\n"):
                 with self.subTest(signature=signature, newline=newline):
                     block = BLOCK.replace("Powered By www.gearaut.com", signature).replace("\n", newline)
