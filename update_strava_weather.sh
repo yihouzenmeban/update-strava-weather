@@ -236,8 +236,8 @@ emoji_tail = re.compile(r'[\s️‍☀-➿\U0001F300-\U0001F5FF\U0001F900-\U0001
 name_base = emoji_tail.sub('', name)
 new_name = (name_base + " " + emoji).strip() if emoji else name_base
 
-# 描述：去掉旧的 gearaut 天气块（温度: ... Powered By www.gearaut.com），再追加新块
-desc_clean = re.sub(r'温度:.*?Powered By www\.gearaut\.com\s*', '', desc, flags=re.S).strip()
+# 描述：去掉旧的 gearaut / QWeather 天气块，再追加新块
+desc_clean = re.sub(r'温度:.*?Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\))\s*', '', desc, flags=re.S).strip()
 if block:
     new_desc = (desc_clean + "\n" + block) if desc_clean else block
 else:
@@ -289,7 +289,11 @@ PY
 # ====== 入口 ======
 check_config
 case "${1:-run}" in
-  sync) shift; python3 "$SCRIPT_DIR/strava_sync.py" "$@" ;;
+  sync)
+    shift
+    export WEATHER_PROVIDER QWEATHER_API_HOST QWEATHER_API_KEY QWEATHER_JWT
+    python3 "$SCRIPT_DIR/strava_sync.py" "$@"
+    ;;
   login) do_login ;;
   auth)
     [[ $# -eq 1 ]] || die "用法: $0 auth（从标准输入读取授权码，不接受命令行参数）"

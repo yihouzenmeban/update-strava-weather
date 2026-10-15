@@ -10,7 +10,7 @@
 - `sync` 分页发现新增活动并重试积压任务，按 ID 跳过已完成活动的详情和天气查询，省去 AI 分步编排
 - 标题：按 weather_code、当地时段和极值生成 emoji（🌞⛅☁️🌫️🌧️❄️⛈️🌙），体感 >30 加 🥵、<0 加 🥶，风速 >30 km/h 加 💨
 - 描述：活动时段内各字段的 min - max（升序），保留 2 位小数
-- 数据源：open-meteo（近期活动用 15 分钟 `minutely_15`，历史活动用 archive hourly）
+- 数据源可选：Open-Meteo（默认，无需密钥）或和风天气（QWeather，需配置 API Host 和凭据）
 - 覆盖前预览确认（`show` / `DRY_RUN=1`）
 - 附带 Claude Code skill，可由 AI 端到端驱动
 
@@ -32,6 +32,8 @@ update-strava-weather/
 ```
 
 ## 首次配置
+
+运行环境需要 Bash、Python 3.9+（使用标准库 `zoneinfo`）和 curl。
 
 1. 到 https://www.strava.com/settings/api 注册应用，拿到 Client ID / Client Secret。
 2. 把应用的 **Authorization Callback Domain** 设为 `localhost`。
@@ -84,7 +86,40 @@ update-strava-weather/
 
 旧版处理记录自动迁移到新格式，保留已有完成结果；新版不再只保留最后 128 条，以免大批历史补扫重复工作。记录和并发锁权限为 `600`，同一仓库同时只能运行一个 `sync`。手动删除天气后请指定 ID 加 `--force` 重算。记录损坏时会报错，不会自动清空；在没有 sync 运行时可先私有备份再移走记录，随后重新补扫，但原队列和扫描进度不会自动恢复。
 
-天气取值沿用活动开始时间加 `moving_time` 的区间，包含区间内采样点及首尾插值。天气请求统一用 UTC 时间戳，emoji 的夜间判断使用 `start_date_local` 的当地钟表时间，避免重复换算时区。近期活动用 forecast `minutely_15`，超过 5 天用 archive `hourly`，不会对缺失数据外推。
+天气取值沿用活动开始时间加 `moving_time` 的区间，包含区间内采样点及首尾插值。emoji 的夜间判断使用 `start_date_local` 的当地钟表时间。Open-Meteo 请求使用 UTC 时间戳，近期活动用 forecast `minutely_15`，超过 5 天用 archive `hourly`，不会对缺失数据外推。
+
+### 选择和风天气
+
+默认使用 Open-Meteo。可在 `strava_config.sh` 中设置 `WEATHER_PROVIDER="qweather"`，或临时选择：
+
+```bash
+./update_strava_weather.sh sync --weather-provider qweather --dry-run
+```
+
+选择和风天气前，从[和风控制台](https://console.qweather.com/)获取个人 API Host 和 API Key，通过环境变量提供：
+
+```bash
+export WEATHER_PROVIDER=qweather
+export QWEATHER_API_HOST=你的个人域名.qweatherapi.com
+# 交互输入 API Key，避免将凭据写进命令历史；此命令适用于 Bash / Zsh
+read -rs QWEATHER_API_KEY
+export QWEATHER_API_KEY
+./update_strava_weather.sh sync --dry-run
+./update_strava_weather.sh sync
+```
+
+`QWEATHER_API_HOST` 只填控制台分配的域名，不含 `https://` 或路径。也可用 `QWEATHER_JWT` 环境变量提供自行生成且尚未过期的 JWT；设置后优先使用 JWT，不同时发送 API Key。脚本不会生成或续期 JWT。认证只放在请求 Header 中，不放进 URL、日志或进程参数。详见[官方认证文档](https://dev.qweather.com/docs/configuration/authentication/)。
+
+和风模式先通过坐标反查城市 ID 和时区，再读取城市的逐小时历史数据；返回时间按城市时区转为时间戳，跨日活动会查询所需各天。其[天气时光机接口](https://dev.qweather.com/docs/api/time-machine/time-machine-weather/)仅支持最近 10 天，**不包含今天**。当天活动会保留在待处理队列，等待后续同步重试；如果末尾插值需要今天的整点，也需要等待。超过 10 天的活动可用 `--weather-provider open-meteo` 补扫，不会自动混用数据源。
+
+历史接口不提供体感温度，因此和风天气块只显示温度、湿度、风速，并注明 `Powered By QWeather (www.qweather.com)`；不追加依赖体感温度的 🥵 / 🥶。缺失、异常或不连续的采样会报错并保留队列，不会外推。
+
+命令行 `--weather-provider` 优先于 `WEATHER_PROVIDER`。切换数据源后，已完成活动仍保留原天气；如需替换，请指定活动并强制重算：
+
+```bash
+./update_strava_weather.sh sync --weather-provider qweather --activity-id 123 --force --dry-run
+./update_strava_weather.sh sync --weather-provider qweather --activity-id 123 --force
+```
 
 需要定时运行时，可自行将下例加入 crontab（替换仓库路径；此仓库不会自动安装定时任务）：
 
@@ -128,7 +163,7 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 ```
 
 子命令：
-- `sync [--activity-id ID | --since DATE [--until DATE] | --all] [--page-size N] [--force] [--dry-run]` — 批量增量同步或历史补扫
+- `sync [--activity-id ID | --since DATE [--until DATE] | --all] [--page-size N] [--weather-provider open-meteo|qweather] [--force] [--dry-run]` — 批量增量同步或历史补扫
 - `login` — 浏览器授权换令牌
 - `auth` — 从标准输入读取授权码并换令牌；终端输入不回显，避免写进命令行参数和历史
 - `list [数量]` — 获取最近的活动，默认 1 条，最多 200 条（`GET /athlete/activities`）
@@ -139,6 +174,8 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 
 环境变量：
 - `ACTIVITY_ID`（`get` / `streams` / 更新时必填）活动 ID
+- `WEATHER_PROVIDER` — `sync` 天气数据源，默认 `open-meteo`，可选 `qweather`
+- `QWEATHER_API_HOST` / `QWEATHER_API_KEY` / `QWEATHER_JWT` — 和风天气个人域名与认证凭据
 - `STRAVA_PAGE` / `STRAVA_AFTER` / `STRAVA_BEFORE` — `list` 的页码、开始和结束 Unix 时间戳，后两者为 API 原始排除边界
 - `WEATHER_EMOJI` / `WEATHER_EMOJI_FILE` 追加到标题的 emoji
 - `WEATHER_DESC` / `WEATHER_DESC_FILE` 追加到描述的天气块
@@ -147,10 +184,20 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 
 ## 天气块模板
 
+Open-Meteo：
+
 ```
 温度: {t_min}°C - {t_max}°C  体感温度: {at_min}°C - {at_max}°C
 湿度: {h_min}% - {h_max}%  风速: {w_min} km/h - {w_max} km/h
 Powered By www.gearaut.com
+```
+
+和风天气：
+
+```
+温度: {t_min}°C - {t_max}°C
+湿度: {h_min}% - {h_max}%  风速: {w_min} km/h - {w_max} km/h
+Powered By QWeather (www.qweather.com)
 ```
 
 ## AI Skill
@@ -165,7 +212,7 @@ skill 优先使用活动的 `start_latlng`，缺少起点时再获取 `latlng` �
 - Strava 访问令牌 6 小时过期，脚本自动用 refresh_token 刷新。
 - 令牌刷新失效时会自动重新开浏览器授权。
 - 两个脚本会将现有凭据文件权限收紧为 `600`，拒绝符号链接和硬链接；新 token 通过私有临时文件原子替换。
-- 网络请求中的密钥、token 和授权码通过标准输入传递，脚本在读取凭据前关闭 Shell 跟踪。优先使用 `login` 完成授权。
+- Strava 网络请求中的密钥、token 和授权码通过标准输入传递；和风天气凭据由 Python 从环境变量读取并放入请求 Header。脚本在读取凭据前关闭 Shell 跟踪。优先使用 `login` 完成授权。
 - 更新所用临时文件放在权限为 `700` 的随机目录内，文件权限为 `600`，结束时自动清理。
 - `DRY_RUN=1` 始终禁止活动写入，包括同时设置 `YES=1` 的情况，两个脚本均适用。
 - 处理记录与运行日志也含个人活动信息，已 gitignore，勿提交。

@@ -5,6 +5,7 @@ import argparse
 from bisect import bisect_left, bisect_right
 import datetime as dt
 import fcntl
+import gzip
 import json
 import math
 import os
@@ -17,6 +18,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 ROOT = Path(__file__).resolve().parent
@@ -24,9 +26,9 @@ FIELDS = ("temperature_2m", "apparent_temperature", "relative_humidity_2m", "win
 VARIABLES = ",".join(FIELDS + ("weather_code",))
 NUMBER = r"-?\d+(?:\.\d+)?"
 WEATHER_BLOCK = re.compile(
-    rf"^温度: {NUMBER}°C - {NUMBER}°C  体感温度: {NUMBER}°C - {NUMBER}°C\r?\n"
+    rf"^温度: {NUMBER}°C - {NUMBER}°C(?:  体感温度: {NUMBER}°C - {NUMBER}°C)?\r?\n"
     rf"湿度: {NUMBER}% - {NUMBER}%  风速: {NUMBER} km/h - {NUMBER} km/h\r?\n"
-    r"Powered By www\.gearaut\.com(?:\r?$)", re.M,
+    r"Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\))(?:\r?$)", re.M,
 )
 
 
@@ -165,6 +167,116 @@ def weather_url(latitude, longitude, start, end, now=None):
     return endpoint + "?" + urlencode(parameters), key
 
 
+def qweather_config():
+    host = os.environ.get("QWEATHER_API_HOST", "").strip()
+    if not re.fullmatch(r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+qweatherapi\.com", host):
+        raise SyncError("请配置 QWEATHER_API_HOST：控制台分配的 qweatherapi.com 域名，不含 https:// 或路径")
+    jwt = os.environ.get("QWEATHER_JWT", "")
+    key = os.environ.get("QWEATHER_API_KEY", "")
+    credential = jwt or key
+    if not credential or any(ord(character) < 33 or ord(character) > 126 for character in credential):
+        raise SyncError("请通过配置或环境变量提供有效的 QWEATHER_API_KEY 或 QWEATHER_JWT")
+    return host, ("Authorization", "Bearer " + jwt) if jwt else ("X-QW-Api-Key", key)
+
+
+def qweather_request(path, parameters):
+    host, (header, credential) = qweather_config()
+    request = urllib.request.Request("https://" + host + path + "?" + urlencode(parameters))
+    # 认证信息不随 HTTP 重定向转发，也不进入 URL 或进程参数。
+    request.add_unredirected_header(header, credential)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read()
+        if isinstance(body, bytes) and body.startswith(b"\x1f\x8b"):
+            body = gzip.decompress(body)
+        payload = json.loads(body)
+    except urllib.error.HTTPError as error:
+        error_type = StopBatchError if error.code in (401, 402, 403, 429) else SyncError
+        raise error_type(f"和风天气 HTTP {error.code}，请求失败，待处理记录已保留") from None
+    except (urllib.error.URLError, OSError, ValueError, EOFError):
+        raise SyncError("和风天气请求失败或响应无效，待处理记录已保留") from None
+    if not isinstance(payload, dict):
+        raise SyncError("和风天气响应格式无效，待处理记录已保留")
+    code = str(payload.get("code", ""))
+    if code != "200":
+        error_type = StopBatchError if code in ("401", "402", "403", "429") else SyncError
+        raise error_type("和风天气返回错误，请检查凭据、接口权限、配额及日期，待处理记录已保留")
+    return payload
+
+
+def qweather_code(icon):
+    try:
+        code = int(icon)
+    except (TypeError, ValueError):
+        raise SyncError("和风天气状况代码无效") from None
+    if code in (100, 150):
+        return 0
+    if code in (101, 102, 103, 151, 152, 153):
+        return 2
+    if code == 104:
+        return 3
+    if code in (302, 303, 304):
+        return 95
+    if 400 <= code <= 499:
+        return 71
+    if 300 <= code <= 399:
+        return 61
+    if 500 <= code <= 515:
+        return 45
+    raise SyncError("和风天气状况代码无效")
+
+
+def qweather_series(location, start, end, now=None):
+    latitude, longitude = location
+    city = qweather_request("/geo/v2/city/lookup", {"location": f"{longitude:.2f},{latitude:.2f}", "number": 1})
+    try:
+        city = city["location"][0]
+        city_id = city["id"]
+        zone = ZoneInfo(city["tz"])
+        if not isinstance(city_id, str) or not city_id:
+            raise ValueError
+    except (KeyError, IndexError, TypeError, ValueError, ZoneInfoNotFoundError):
+        raise SyncError("和风天气未返回有效城市 ID 或时区") from None
+    today = (now or dt.datetime.now(dt.timezone.utc)).astimezone(zone).date()
+    first = dt.datetime.fromtimestamp(start, zone).date()
+    # 末尾插值需要下一整点，可能需要额外查询一天。
+    local_end = dt.datetime.fromtimestamp(end, zone)
+    next_hour = local_end.replace(minute=0, second=0, microsecond=0)
+    if next_hour.timestamp() < end:
+        next_hour += dt.timedelta(hours=1)
+    last = next_hour.date()
+    if first < today - dt.timedelta(days=10):
+        raise SyncError("和风天气仅支持最近 10 天历史数据，请改用 --weather-provider open-meteo 补扫")
+    if last >= today:
+        raise SyncError("和风天气历史数据不含今天，活动保留待处理，数据可用后重试")
+    series = {field: [] for field in ("time", "temperature_2m", "relative_humidity_2m", "wind_speed_10m", "weather_code")}
+    day = first
+    while day <= last:
+        payload = qweather_request("/v7/historical/weather", {"location": city_id, "date": day.strftime("%Y%m%d"), "unit": "m"})
+        rows = payload.get("weatherHourly")
+        if not isinstance(rows, list) or not rows:
+            raise SyncError("和风天气缺少逐小时历史数据，待处理记录已保留")
+        for row in rows:
+            try:
+                time = dt.datetime.fromisoformat(row["time"])
+                if time.tzinfo is None:
+                    time = time.replace(tzinfo=zone)
+                temperature, humidity, wind = (float(row[field]) for field in ("temp", "humidity", "windSpeed"))
+                if (any(not numeric(value) for value in (temperature, humidity, wind))
+                        or not -100 <= temperature <= 70 or not 0 <= humidity <= 100 or wind < 0):
+                    raise ValueError
+                code = qweather_code(row["icon"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                raise SyncError("和风天气逐小时数据无效，待处理记录已保留") from None
+            for field, value in zip(series, (time.timestamp(), temperature, humidity, wind, code)):
+                series[field].append(value)
+        day += dt.timedelta(days=1)
+    times = series["time"]
+    if any(right - left != 3600 for left, right in zip(times, times[1:])):
+        raise SyncError("和风天气逐小时数据不连续，待处理记录已保留")
+    return series
+
+
 def coordinates(value):
     if isinstance(value, (list, tuple)) and len(value) == 2:
         latitude, longitude = value
@@ -173,7 +285,7 @@ def coordinates(value):
     return None
 
 
-def weather_annotation(activity, location):
+def weather_annotation(activity, location, provider="open-meteo"):
     try:
         start_date = dt.datetime.fromisoformat(activity["start_date"].replace("Z", "+00:00"))
         local_start = dt.datetime.fromisoformat(activity["start_date_local"].replace("Z", "+00:00")).replace(tzinfo=None)
@@ -183,21 +295,25 @@ def weather_annotation(activity, location):
     except (KeyError, TypeError, ValueError):
         raise SyncError("活动缺少有效的 start_date、start_date_local 或 moving_time") from None
     start, end = start_date.timestamp(), start_date.timestamp() + duration
-    url, key = weather_url(*location, start, end)
-    try:
-        with urllib.request.urlopen(url, timeout=30) as response:
-            payload = json.load(response)
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403, 429):
-            raise StopBatchError(f"Open-Meteo HTTP {error.code}，停止本轮处理，待处理记录已保留") from None
-        raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
-    except (urllib.error.URLError, OSError, ValueError):
-        raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
-    series = payload.get(key, {}) if isinstance(payload, dict) else {}
+    if provider == "qweather":
+        series = qweather_series(location, start, end)
+    else:
+        url, key = weather_url(*location, start, end)
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403, 429):
+                raise StopBatchError(f"Open-Meteo HTTP {error.code}，停止本轮处理，待处理记录已保留") from None
+            raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
+        except (urllib.error.URLError, OSError, ValueError):
+            raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
+        series = payload.get(key, {}) if isinstance(payload, dict) else {}
     if not isinstance(series, dict):
         raise SyncError("Open-Meteo 未返回有效天气序列，未记录成功")
     times = series.get("time", [])
-    ranges = {field: interval_extrema(times, series.get(field, []), start, end) for field in FIELDS}
+    fields = tuple(field for field in FIELDS if provider != "qweather" or field != "apparent_temperature")
+    ranges = {field: interval_extrema(times, series.get(field, []), start, end) for field in fields}
     first, last = max(0, bisect_right(times, start) - 1), bisect_right(times, end)
     weather_codes = series.get("weather_code", [])
     if (not isinstance(weather_codes, list) or len(weather_codes) != len(times)
@@ -218,14 +334,17 @@ def weather_annotation(activity, location):
         emoji = "🌙" if night else "☁️" if 3 in codes else "⛅" if 2 in codes else "🌞"
     if ranges["wind_speed_10m"][1] > 30:
         emoji += "💨"
-    if ranges["apparent_temperature"][1] > 30:
+    apparent = ranges.get("apparent_temperature")
+    if apparent and apparent[1] > 30:
         emoji += "🥵"
-    if ranges["apparent_temperature"][0] < 0:
+    if apparent and apparent[0] < 0:
         emoji += "🥶"
-    temperature, apparent, humidity, wind = (ranges[field] for field in FIELDS)
-    description = (f"温度: {temperature[0]:.2f}°C - {temperature[1]:.2f}°C  体感温度: {apparent[0]:.2f}°C - {apparent[1]:.2f}°C\n"
+    temperature, humidity, wind = (ranges[field] for field in ("temperature_2m", "relative_humidity_2m", "wind_speed_10m"))
+    feels_like = f"  体感温度: {apparent[0]:.2f}°C - {apparent[1]:.2f}°C" if apparent else ""
+    attribution = "Powered By QWeather (www.qweather.com)" if provider == "qweather" else "Powered By www.gearaut.com"
+    description = (f"温度: {temperature[0]:.2f}°C - {temperature[1]:.2f}°C{feels_like}\n"
                    f"湿度: {humidity[0]:.2f}% - {humidity[1]:.2f}%  风速: {wind[0]:.2f} km/h - {wind[1]:.2f} km/h\n"
-                   "Powered By www.gearaut.com")
+                   f"{attribution}")
     return emoji, description
 
 
@@ -254,7 +373,7 @@ def process_activity(args, activity_id, activities, force=False):
         location = next((coordinates(point) for point in points if coordinates(point)), None)
     if location is None:
         raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
-    emoji, description = weather_annotation(activity, location)
+    emoji, description = weather_annotation(activity, location, args.weather_provider)
     extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "", "WEATHER_DESC_FILE": "",
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
              "STRAVA_SYNC_CHECK_WEATHER": "0" if force else "1"}
@@ -342,7 +461,16 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写活动、队列或扫描进度")
     parser.add_argument("--latitude", type=float, help="指定单条活动的纬度")
     parser.add_argument("--longitude", type=float, help="指定单条活动的经度")
+    parser.add_argument("--weather-provider", choices=("open-meteo", "qweather"),
+                        default=os.environ.get("WEATHER_PROVIDER", "open-meteo"), help="天气数据源，默认 open-meteo；可通过 WEATHER_PROVIDER 配置")
     args = parser.parse_args()
+    if args.weather_provider not in ("open-meteo", "qweather"):
+        parser.error("WEATHER_PROVIDER 必须为 open-meteo 或 qweather")
+    if args.weather_provider == "qweather":
+        try:
+            qweather_config()
+        except SyncError as error:
+            parser.error(str(error))
     args.dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
     if args.activity_id is not None and not re.fullmatch(r"[1-9][0-9]*", args.activity_id):
         parser.error("--activity-id 必须为正整数")
