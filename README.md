@@ -112,7 +112,16 @@ export QWEATHER_API_KEY
 
 和风模式先通过坐标反查城市 ID 和时区，再读取城市的逐小时历史数据；返回时间按城市时区转为时间戳，跨日活动会查询所需各天。其[天气时光机接口](https://dev.qweather.com/docs/api/time-machine/time-machine-weather/)仅支持最近 10 天，**不包含今天**。当天活动会保留在待处理队列，等待后续同步重试；如果末尾插值需要今天的整点，也需要等待。超过 10 天的活动可用 `--weather-provider open-meteo` 补扫，不会自动混用数据源。
 
-历史接口不提供体感温度，因此和风天气块只显示温度、湿度、风速，并注明 `Powered By QWeather (www.qweather.com)`；不追加依赖体感温度的 🥵 / 🥶。缺失、异常或不连续的采样会报错并保留队列，不会外推。
+历史接口不提供体感温度，脚本使用温度、湿度、风速，按 [Steadman AT 的无辐射近似公式](https://www.bom.gov.au/info/thermal_stress/#atapproximation)在本地计算：
+
+```text
+e  = RH / 100 × 6.105 × exp(17.27 × T / (237.7 + T))
+AT = T + 0.33 × e − 0.70 × (windSpeed / 3.6) − 4.00
+```
+
+`T` 为摄氏气温，`RH` 为相对湿度（0–100），`windSpeed` 为接口返回的 km/h 风速，公式使用 10 米高度风速口径。活动首尾先对齐并插值温湿风输入，再与时段内逐小时采样一起逐点计算 AT，取这些计算点的最小值和最大值；不把不同时间的温湿风极值拼在一起，也不直接插值 AT。描述中显示为“体感温度”，来源仍注明 `Powered By QWeather (www.qweather.com)`；体感 >30°C 加 🥵、<0°C 加 🥶。
+
+该算法不考虑太阳直晒，结果为本地计算值，与和风官方体感温度的算法口径不一定相同。缺失、异常或不连续的采样会报错并保留队列，不会外推。已完成活动仍按原记录跳过，若需为旧的和风天气块补上体感温度，使用下方的 `--force` 命令重算。
 
 命令行 `--weather-provider` 优先于 `WEATHER_PROVIDER`。切换数据源后，已完成活动仍保留原天气；如需替换，请指定活动并强制重算：
 
@@ -195,7 +204,7 @@ Powered By www.gearaut.com
 和风天气：
 
 ```
-温度: {t_min}°C - {t_max}°C
+温度: {t_min}°C - {t_max}°C  体感温度: {at_min}°C - {at_max}°C
 湿度: {h_min}% - {h_max}%  风速: {w_min} km/h - {w_max} km/h
 Powered By QWeather (www.qweather.com)
 ```

@@ -125,7 +125,7 @@ def numeric(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def interval_extrema(times, values, start, end):
+def interval_samples(times, values, start, end):
     if (not isinstance(times, (list, tuple)) or not isinstance(values, (list, tuple))
             or not times or len(times) != len(values) or any(not numeric(time) for time in times)
             or any(left >= right for left, right in zip(times, times[1:]))
@@ -147,8 +147,21 @@ def interval_extrema(times, values, start, end):
     samples = values[bisect_left(times, start):bisect_right(times, end)]
     if any(not numeric(value) for value in samples):
         raise SyncError("活动时段内天气数据缺失")
-    samples = list(samples) + [interpolate(start), interpolate(end)]
+    return list(samples) + [interpolate(start), interpolate(end)]
+
+
+def interval_extrema(times, values, start, end):
+    samples = interval_samples(times, values, start, end)
     return min(samples), max(samples)
+
+
+def steadman_apparent_temperature(temperature, humidity, wind_kmh):
+    if (any(not numeric(value) for value in (temperature, humidity, wind_kmh))
+            or not -100 <= temperature <= 70 or not 0 <= humidity <= 100 or wind_kmh < 0):
+        raise SyncError("计算体感温度所需的温度、湿度或风速无效")
+    # Steadman/BOM 无辐射近似：水汽压用 hPa，10 米风速由 km/h 换算为 m/s。
+    vapor_pressure = humidity / 100 * 6.105 * math.exp(17.27 * temperature / (237.7 + temperature))
+    return temperature + 0.33 * vapor_pressure - 0.70 * (wind_kmh / 3.6) - 4.00
 
 
 def weather_url(latitude, longitude, start, end, now=None):
@@ -314,6 +327,11 @@ def weather_annotation(activity, location, provider="open-meteo"):
     times = series.get("time", [])
     fields = tuple(field for field in FIELDS if provider != "qweather" or field != "apparent_temperature")
     ranges = {field: interval_extrema(times, series.get(field, []), start, end) for field in fields}
+    if provider == "qweather":
+        # 先插值首尾的原始输入，再逐点计算，避免对非线性的 AT 直接插值。
+        inputs = [interval_samples(times, series[field], start, end) for field in fields]
+        apparent_samples = [steadman_apparent_temperature(*values) for values in zip(*inputs)]
+        ranges["apparent_temperature"] = min(apparent_samples), max(apparent_samples)
     first, last = max(0, bisect_right(times, start) - 1), bisect_right(times, end)
     weather_codes = series.get("weather_code", [])
     if (not isinstance(weather_codes, list) or len(weather_codes) != len(times)

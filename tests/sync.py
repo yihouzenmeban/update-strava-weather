@@ -208,9 +208,14 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(body["name"], "晨跑 🌞")
         self.assertIn("温度: 20.50°C - 22.50°C", body["description"])
         self.assertIn("Powered By QWeather (www.qweather.com)", body["description"])
-        self.assertNotIn("体感温度:", body["description"])
-        self.assertEqual(body["description"].count("温度:"), 1)
+        self.assertIn("体感温度: 20.78°C - 23.93°C", body["description"])
+        self.assertEqual(body["description"].count("体感温度:"), 1)
         self.assertIn("https://summitbag.com/example", body["description"])
+        self.clear_requests()
+        self.scenario["activity"]["description"] = body["description"]
+        self.scenario["fresh"]["description"] = body["description"]
+        self.assert_success(self.sync("--force"))
+        self.assertEqual(self.requests()[-1]["body"]["description"].count("体感温度:"), 1)
 
     def test_provider_flag_overrides_config_and_qweather_blocks_are_recognized(self):
         self.configure_qweather()
@@ -218,12 +223,16 @@ class SyncTests(unittest.TestCase):
         self.assertIn("open-meteo.com/", next(entry["url"] for entry in self.requests() if entry["kind"] == "weather"))
         self.state.unlink()
         self.clear_requests()
-        self.scenario["activity"]["description"] = (
-            "温度: 20.00°C - 22.00°C\n湿度: 60.00% - 70.00%  风速: 3.00 km/h - 5.00 km/h\n"
-            "Powered By QWeather (www.qweather.com)")
-        self.assert_success(self.sync())
-        self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "existing"})
-        self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
+        for apparent in ("", "  体感温度: 20.00°C - 22.00°C"):
+            with self.subTest(apparent=apparent):
+                self.state.unlink(missing_ok=True)
+                self.clear_requests()
+                self.scenario["activity"]["description"] = (
+                    f"温度: 20.00°C - 22.00°C{apparent}\n湿度: 60.00% - 70.00%  风速: 3.00 km/h - 5.00 km/h\n"
+                    "Powered By QWeather (www.qweather.com)")
+                self.assert_success(self.sync())
+                self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "existing"})
+                self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
 
     def test_switching_from_qweather_preserves_notes_and_removes_old_block(self):
         self.scenario["fresh"]["description"] += (
@@ -523,6 +532,48 @@ class WeatherMathTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_steadman_formula_and_wind_units(self):
+        module = self.load_module()
+        for arguments, expected in (((0, 0, 0), -4), ((0, 100, 0), -1.98535),
+                                    ((20, 0, 36), 9), ((30, 70, 18), 32.268)):
+            with self.subTest(arguments=arguments):
+                self.assertAlmostEqual(module.steadman_apparent_temperature(*arguments), expected, places=3)
+        for arguments in ((None, 50, 3), (True, 50, 3), (float("nan"), 50, 3),
+                          (20, -1, 3), (20, 101, 3), (20, 50, -1), (20, 50, float("inf"))):
+            with self.subTest(arguments=arguments), self.assertRaises(module.SyncError):
+                module.steadman_apparent_temperature(*arguments)
+
+    def test_qweather_steadman_calculates_from_interpolated_inputs_and_interior_samples(self):
+        module = self.load_module()
+        start = dt.datetime(2026, 10, 12, 8, tzinfo=dt.timezone.utc)
+        activity = {"start_date": (start + dt.timedelta(seconds=900)).isoformat(),
+                    "start_date_local": "2026-10-12T16:15:00Z", "moving_time": 5400}
+        series = {"time": [start.timestamp(), start.timestamp() + 3600, start.timestamp() + 7200],
+                  "temperature_2m": [20, 30, 20], "relative_humidity_2m": [40, 80, 40],
+                  "wind_speed_10m": [3.6, 10.8, 3.6], "weather_code": [0, 0, 0]}
+        with patch.object(module, "qweather_series", return_value=series):
+            emoji, description = module.weather_annotation(activity, (39.9, 116.4), "qweather")
+        self.assertEqual(emoji, "🌞🥵")
+        self.assertIn("体感温度: 21.93°C - 35.06°C", description)
+        self.assertTrue(module.has_weather(description))
+        for field in ("temperature_2m", "relative_humidity_2m", "wind_speed_10m"):
+            incomplete = dict(series, **{field: [20, None, 20]})
+            with self.subTest(field=field), patch.object(module, "qweather_series", return_value=incomplete):
+                with self.assertRaises(module.SyncError):
+                    module.weather_annotation(activity, (39.9, 116.4), "qweather")
+
+    def test_qweather_steadman_heat_and_cold_emoji_thresholds(self):
+        module = self.load_module()
+        start = dt.datetime(2026, 10, 12, 8, tzinfo=dt.timezone.utc)
+        activity = {"start_date": start.isoformat(), "start_date_local": "2026-10-12T16:00:00Z", "moving_time": 0}
+        for temperature, humidity, wind, expected in ((30, 70, 18, "🌞🥵"), (5, 50, 18, "🌞🥶"),
+                                                       (34, 0, 0, "🌞"), (4, 0, 0, "🌞")):
+            series = {"time": [start.timestamp()], "temperature_2m": [temperature],
+                      "relative_humidity_2m": [humidity], "wind_speed_10m": [wind], "weather_code": [0]}
+            with self.subTest(temperature=temperature, humidity=humidity), \
+                    patch.object(module, "qweather_series", return_value=series):
+                self.assertEqual(module.weather_annotation(activity, (39.9, 116.4), "qweather")[0], expected)
 
     def test_qweather_cross_day_requests_use_city_timezone_and_complete_boundaries(self):
         module = self.load_module()
