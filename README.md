@@ -119,7 +119,7 @@ e  = RH / 100 × 6.105 × exp(17.27 × T / (237.7 + T))
 AT = T + 0.33 × e − 0.70 × (windSpeed / 3.6) − 4.00
 ```
 
-`T` 为摄氏气温，`RH` 为相对湿度（0–100），`windSpeed` 为接口返回的 km/h 风速，公式使用 10 米高度风速口径。活动首尾先对齐并插值温湿风输入，再与时段内逐小时采样一起逐点计算 AT，取这些计算点的最小值和最大值；不把不同时间的温湿风极值拼在一起，也不直接插值 AT。描述中显示为“体感温度”，天气块保留原有的 `Powered By www.gearaut.com`；体感 >30°C 加 🥵、<0°C 加 🥶。
+`T` 为摄氏气温，`RH` 为相对湿度（0–100），`windSpeed` 为接口返回的 km/h 风速，公式使用 10 米高度风速口径。活动首尾先对齐并插值温湿风输入，再与时段内逐小时采样一起逐点计算 AT，取这些计算点的最小值和最大值；不把不同时间的温湿风极值拼在一起，也不直接插值 AT。描述中显示为“体感温度”，天气块署名为 `Not Powered By www.gearaut.com 👻`；体感 >30°C 加 🥵、<0°C 加 🥶。
 
 该算法不考虑太阳直晒，结果为本地计算值，与和风官方体感温度的算法口径不一定相同。缺失、异常或不连续的采样会报错并保留队列，不会外推。已完成活动仍按原记录跳过，若需为旧的和风天气块补上体感温度，使用下方的 `--force` 命令重算。
 
@@ -198,7 +198,7 @@ Open-Meteo：
 ```
 温度: {t_min}°C - {t_max}°C  体感温度: {at_min}°C - {at_max}°C
 湿度: {h_min}% - {h_max}%  风速: {w_min} km/h - {w_max} km/h
-Powered By www.gearaut.com
+Not Powered By www.gearaut.com 👻
 ```
 
 和风天气：
@@ -206,7 +206,7 @@ Powered By www.gearaut.com
 ```
 温度: {t_min}°C - {t_max}°C  体感温度: {at_min}°C - {at_max}°C
 湿度: {h_min}% - {h_max}%  风速: {w_min} km/h - {w_max} km/h
-Powered By www.gearaut.com
+Not Powered By www.gearaut.com 🍚
 ```
 
 ## AI Skill

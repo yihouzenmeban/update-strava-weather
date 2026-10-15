@@ -172,7 +172,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("体感温度: 32.00°C - 36.00°C", body["description"])
         self.assertIn("湿度: 70.00% - 90.00%", body["description"])
         self.assertIn("风速: 5.00 km/h - 9.00 km/h", body["description"])
-        self.assertTrue(body["description"].endswith("Powered By www.gearaut.com"))
+        self.assertTrue(body["description"].endswith("Not Powered By www.gearaut.com 🍚"))
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o600)
         self.assertEqual(list(self.runtime.iterdir()), [])
         self.clear_requests()
@@ -208,7 +208,7 @@ class SyncTests(unittest.TestCase):
         body = requests[-1]["body"]
         self.assertEqual(body["name"], "晨跑 🌞")
         self.assertIn("温度: 20.50°C - 22.50°C", body["description"])
-        self.assertTrue(body["description"].endswith("Powered By www.gearaut.com"))
+        self.assertTrue(body["description"].endswith("Not Powered By www.gearaut.com 🍚"))
         self.assertIn("体感温度: 20.78°C - 23.93°C", body["description"])
         self.assertEqual(body["description"].count("体感温度:"), 1)
         self.assertIn("https://summitbag.com/example", body["description"])
@@ -217,6 +217,7 @@ class SyncTests(unittest.TestCase):
         self.scenario["fresh"]["description"] = body["description"]
         self.assert_success(self.sync("--force"))
         self.assertEqual(self.requests()[-1]["body"]["description"].count("体感温度:"), 1)
+        self.assertEqual(self.requests()[-1]["body"]["description"], body["description"])
 
     def test_provider_flag_overrides_config_and_qweather_blocks_are_recognized(self):
         self.configure_qweather()
@@ -264,6 +265,13 @@ class SyncTests(unittest.TestCase):
         self.assertFalse(self.state.exists())
         self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
 
+    def test_current_weather_signature_is_skipped_without_weather_requests(self):
+        self.scenario["activity"]["description"] = BLOCK.replace(
+            "Powered By www.gearaut.com", "Not Powered By www.gearaut.com 🍚")
+        self.assert_success(self.sync())
+        self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "existing"})
+        self.assertTrue(all(entry["kind"] == "strava" and entry["method"] == "GET" for entry in self.requests()))
+
     def test_existing_weather_and_indoor_activities_are_remembered(self):
         for indoor in (False, True):
             with self.subTest(indoor=indoor):
@@ -285,11 +293,21 @@ class SyncTests(unittest.TestCase):
                 self.assertFalse(self.state.exists())
 
     def test_force_recalculates_cached_activity_and_existing_weather(self):
-        self.scenario["activity"] = dict(self.activity, description=BLOCK)
-        self.assert_success(self.sync())
-        self.clear_requests()
-        self.assert_success(self.sync("--force"))
-        self.assertEqual(self.requests()[-1]["method"], "PUT")
+        for signature in ("Not Powered By www.gearaut.com 🍚", "Not Powered By www.gearaut.com 👻",
+                          "Powered By www.gearaut.com"):
+            with self.subTest(signature=signature):
+                block = BLOCK.replace("Powered By www.gearaut.com", signature)
+                self.scenario["activity"] = dict(self.activity, description=block)
+                self.scenario["fresh"] = dict(self.activity, description="原备注\n" + block)
+                self.assert_success(self.sync())
+                self.clear_requests()
+                self.assert_success(self.sync("--force"))
+                self.assertEqual(self.requests()[-1]["method"], "PUT")
+                description = self.requests()[-1]["body"]["description"]
+                self.assertEqual(description.count("温度:"), 2)
+                self.assertEqual(description.count("Not Powered By"), 1)
+                self.assertTrue(description.startswith("原备注\n温度: 22.00°C"))
+                self.assertTrue(description.endswith("Not Powered By www.gearaut.com 🍚"))
 
     def test_failures_are_not_cached_and_can_be_retried(self):
         for failure in ({"weather_error": True}, {"put_status": 500}, {"put_id": 999}):
@@ -533,6 +551,15 @@ class WeatherMathTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_current_and_legacy_weather_signatures_are_recognized(self):
+        module = self.load_module()
+        for signature in ("Not Powered By www.gearaut.com 🍚", "Not Powered By www.gearaut.com 👻",
+                          "Powered By www.gearaut.com", "Powered By QWeather (www.qweather.com)"):
+            for newline in ("\n", "\r\n"):
+                with self.subTest(signature=signature, newline=newline):
+                    block = BLOCK.replace("Powered By www.gearaut.com", signature).replace("\n", newline)
+                    self.assertTrue(module.has_weather("原备注" + newline + block))
 
     def test_steadman_formula_and_wind_units(self):
         module = self.load_module()

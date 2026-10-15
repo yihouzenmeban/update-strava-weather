@@ -28,7 +28,7 @@ NUMBER = r"-?\d+(?:\.\d+)?"
 WEATHER_BLOCK = re.compile(
     rf"^温度: {NUMBER}°C - {NUMBER}°C(?:  体感温度: {NUMBER}°C - {NUMBER}°C)?\r?\n"
     rf"湿度: {NUMBER}% - {NUMBER}%  风速: {NUMBER} km/h - {NUMBER} km/h\r?\n"
-    r"Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\))(?:\r?$)", re.M,
+    r"(?:Not Powered By www\.gearaut\.com [🍚👻]|Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\)))(?:\r?$)", re.M,
 )
 
 
@@ -361,7 +361,7 @@ def weather_annotation(activity, location, provider="open-meteo"):
     feels_like = f"  体感温度: {apparent[0]:.2f}°C - {apparent[1]:.2f}°C" if apparent else ""
     description = (f"温度: {temperature[0]:.2f}°C - {temperature[1]:.2f}°C{feels_like}\n"
                    f"湿度: {humidity[0]:.2f}% - {humidity[1]:.2f}%  风速: {wind[0]:.2f} km/h - {wind[1]:.2f} km/h\n"
-                   "Powered By www.gearaut.com")
+                   "Not Powered By www.gearaut.com 🍚")
     return emoji, description
 
 

@@ -4,7 +4,7 @@
 #
 # 行为：脚本会先拉取活动当前的 name 和 description，
 #   - 标题：去掉末尾已有的天气 emoji 后，追加 WEATHER_EMOJI（如 "☁️🥵"）
-#   - 描述：去掉旧的 "温度:...Powered By www.gearaut.com" 块后，追加 WEATHER_DESC
+#   - 描述：去掉旧天气块（兼容旧署名和 "Not Powered By www.gearaut.com 🍚"），追加 WEATHER_DESC
 #   即"追加"而非"覆盖"。
 #
 # 用法：
@@ -237,7 +237,7 @@ name_base = emoji_tail.sub('', name)
 new_name = (name_base + " " + emoji).strip() if emoji else name_base
 
 # 描述：去掉旧的 gearaut / QWeather 天气块，再追加新块
-desc_clean = re.sub(r'温度:.*?Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\))\s*', '', desc, flags=re.S).strip()
+desc_clean = re.sub(r'温度:.*?(?:Not Powered By www\.gearaut\.com [🍚👻]|Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\)))\s*', '', desc, flags=re.S).strip()
 if block:
     new_desc = (desc_clean + "\n" + block) if desc_clean else block
 else:
