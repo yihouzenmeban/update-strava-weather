@@ -43,6 +43,21 @@ update-strava-weather/
 
 ## 用法
 
+直接读取 Strava API（复用本地授权，无需 MCP）：
+
+```bash
+# 最新一次活动，返回 JSON 数组；也可 list 5 获取最近 5 次（数量范围 1–200）
+./update_strava_weather.sh list
+
+# 活动详情，返回 JSON 对象
+ACTIVITY_ID=123 ./update_strava_weather.sh get
+
+# 活动坐标流，坐标位于 latlng.data
+ACTIVITY_ID=123 ./update_strava_weather.sh streams
+```
+
+只读命令的标准输出仅包含 API JSON，可重定向到文件或交给 Python 解析；授权/刷新提示和错误写入标准错误。HTTP 错误、网络错误、无效 JSON 均以非零退出码结束，列表为空时返回 `[]`。
+
 更新单个活动（交互确认）：
 ```bash
 ACTIVITY_ID=123 \
@@ -64,11 +79,14 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/tmp/desc.txt YES=1
 子命令：
 - `login` — 浏览器授权换令牌
 - `auth <code>` — 手动用授权码换令牌
+- `list [数量]` — 获取最近的活动，默认 1 条，最多 200 条（`GET /athlete/activities`）
+- `get` — 获取 `ACTIVITY_ID` 对应的活动详情（`GET /activities/{id}`）
+- `streams` — 获取 `ACTIVITY_ID` 对应的坐标流（`GET /activities/{id}/streams`，`keys=latlng`）
 - `show` — 等同 `DRY_RUN=1`，仅预览
 - 不带参数 — 拉取活动、追加天气、确认后更新
 
 环境变量：
-- `ACTIVITY_ID`（必填）要更新的活动 ID
+- `ACTIVITY_ID`（`get` / `streams` / 更新时必填）活动 ID
 - `WEATHER_EMOJI` / `WEATHER_EMOJI_FILE` 追加到标题的 emoji
 - `WEATHER_DESC` / `WEATHER_DESC_FILE` 追加到描述的天气块
 - `DRY_RUN=1` 仅预览
@@ -84,7 +102,9 @@ Powered By www.gearaut.com
 
 ## AI Skill
 
-`.claude/skills/strava-weather-update/SKILL.md` 提供端到端流程：MCP 拉活动 → open-meteo 查天气 → 插值 min/max → AI 选 emoji → 预览确认 → 写入。在本仓库目录下对 Claude 说"更新我最新活动的天气"即可触发。
+`.claude/skills/strava-weather-update/SKILL.md` 提供端到端流程：本地脚本通过 Strava API 拉活动 → open-meteo 查天气 → 插值 min/max → AI 选 emoji → 本地脚本写入。在本仓库目录下对 Claude 说"更新我最新活动的天气"即可触发，无需连接 Strava MCP。
+
+skill 优先使用活动的 `start_latlng`，缺少起点时再获取 `latlng` 坐标流；读写共用现有 OAuth 授权和令牌自动刷新。接口与权限见 [Strava 官方文档](https://developers.strava.com/docs/reference/)。
 
 ## 注意
 

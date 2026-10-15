@@ -23,6 +23,10 @@
 #     YES=1                  跳过确认直接更新（自动化/skill 用）
 #
 # 也可以手动拿 code 后用：./update_strava_weather.sh auth <code>
+# 只读 API（stdout 为 JSON，授权/刷新提示写 stderr）：
+#   ./update_strava_weather.sh list [数量]（默认 1）
+#   ACTIVITY_ID=xxx ./update_strava_weather.sh get
+#   ACTIVITY_ID=xxx ./update_strava_weather.sh streams（坐标流）
 
 set -euo pipefail
 
@@ -179,6 +183,56 @@ print("✅ 已刷新")
   return 0
 }
 
+# 只读 API 用子 shell 管理临时文件，不影响更新命令的 EXIT trap。
+do_read() (
+  local endpoint
+  case "$1" in
+    list)
+      local count="${2:-1}"
+      [[ "$count" =~ ^[1-9][0-9]{0,2}$ ]] && (( count <= 200 )) || die "活动数量必须为 1–200 的整数"
+      endpoint="athlete/activities?page=1&per_page=${count}"
+      ;;
+    get|streams)
+      [[ "${ACTIVITY_ID:-}" =~ ^[1-9][0-9]*$ ]] || die "请通过环境变量 ACTIVITY_ID 指定有效的活动 ID（正整数）"
+      endpoint="activities/${ACTIVITY_ID}"
+      [[ "$1" != "streams" ]] || endpoint+="/streams?keys=latlng&key_by_type=true"
+      ;;
+  esac
+
+  if ! ensure_token >&2; then
+    do_login >&2
+  fi
+  local access response_file code
+  access=$(token_field access_token)
+  response_file=$(mktemp -t strava_read)
+  trap 'rm -f "$response_file"' EXIT
+  if ! code=$(curl -sS --connect-timeout 10 --max-time 60 \
+    -o "$response_file" -w "%{http_code}" \
+    "https://www.strava.com/api/v3/${endpoint}" \
+    -H "Authorization: Bearer ${access}"); then
+    die "Strava API 网络请求失败"
+  fi
+  case "$code" in
+    2[0-9][0-9]) ;;
+    401|403) die "Strava API HTTP ${code}：请运行 $0 login 重新授权，确保授予 activity:read_all,activity:write" ;;
+    404) die "Strava API HTTP 404：活动或轨迹不存在，或当前账号没有访问权限" ;;
+    429) die "Strava API HTTP 429：请求次数达到限制，请稍后重试" ;;
+    *) die "Strava API HTTP ${code}：读取失败" ;;
+  esac
+  python3 - "$response_file" <<'PY'
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as response:
+        data = json.load(response)
+except (ValueError, OSError):
+    print("❌ Strava API 返回了无效的 JSON 响应", file=sys.stderr)
+    sys.exit(1)
+json.dump(data, sys.stdout, ensure_ascii=False)
+print()
+PY
+)
+
 # 更新活动：拉取当前 name/description，去掉旧天气标注，追加新天气后 PUT
 do_update() {
   [[ -n "${ACTIVITY_ID:-}" ]] || die "请通过环境变量 ACTIVITY_ID 指定要更新的活动 ID"
@@ -284,7 +338,8 @@ check_config
 case "${1:-run}" in
   login) do_login ;;
   auth) do_auth "${2:-}" ;;
+  list|get|streams) do_read "$1" "${2:-}" ;;
   show) DRY_RUN=1 do_update ;;
   run|"") do_update ;;
-  *) die "未知命令: $1（可用: login / auth <code> / show / 不带参数直接运行）" ;;
+  *) die "未知命令: $1（可用: login / auth <code> / list [数量] / get / streams / show / 不带参数直接运行）" ;;
 esac
