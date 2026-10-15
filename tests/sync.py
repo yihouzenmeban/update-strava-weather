@@ -14,7 +14,6 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-import urllib.error
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -87,19 +86,12 @@ class Response:
     def read(self): return json.dumps(self.payload).encode()
 def urlopen(request, timeout=None):
     url = request if isinstance(request, str) else request.full_url
-    assert url.startswith(("https://api.open-meteo.com/", "https://archive-api.open-meteo.com/",
-                           "https://test.qweatherapi.com/")), url
+    assert url.startswith(("https://api.open-meteo.com/", "https://archive-api.open-meteo.com/")), url
     with open("requests.jsonl", "a") as log:
         log.write(json.dumps({"kind": "weather", "url": url}) + "\n")
     scenario = json.loads(Path("scenario.json").read_text())
     if scenario.get("weather_error"):
         raise urllib.error.URLError("synthetic network failure")
-    if "qweatherapi.com/" in url:
-        assert request.get_header("X-qw-api-key") == "test-weather-key"
-        assert "test-weather-key" not in url
-        if "/geo/" in url:
-            return Response({"code": "200", "location": [{"id": "101010100", "tz": "Asia/Shanghai"}]})
-        return Response(scenario["qweather"])
     return Response(scenario["weather"])
 urllib.request.urlopen = urlopen
 '''
@@ -126,8 +118,7 @@ class SyncTests(unittest.TestCase):
         (self.directory / "sitecustomize.py").write_text(WEATHER_MOCK)
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "FORCE", "WEATHER_DESC", "WEATHER_DESC_FILE",
-                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "CLIENT_ID", "CLIENT_SECRET",
-                     "WEATHER_PROVIDER", "QWEATHER_API_HOST", "QWEATHER_API_KEY", "QWEATHER_JWT"):
+                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "CLIENT_ID", "CLIENT_SECRET"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
                                 PYTHONPATH=str(self.directory), TMPDIR=str(self.runtime))
@@ -180,63 +171,22 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(self.requests()), 1)
         self.assertIn("/athlete/activities?", self.requests()[0]["url"])
 
-    def configure_qweather(self):
-        with (self.directory / "strava_config.sh").open("a") as config:
-            config.write('WEATHER_PROVIDER="qweather"\nQWEATHER_API_HOST="test.qweatherapi.com"\n'
-                         'QWEATHER_API_KEY="test-weather-key"\n')
-        start = dt.datetime.fromisoformat(self.activity["start_date"])
-        local = start.astimezone(dt.timezone(dt.timedelta(hours=8)))
-        self.scenario["qweather"] = {"code": "200", "weatherHourly": [
-            {"time": local.replace(minute=0).strftime("%Y-%m-%d %H:%M"),
-             "temp": "20", "humidity": "60", "windSpeed": "3", "icon": "100"},
-            {"time": (local.replace(minute=0) + dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),
-             "temp": "26", "humidity": "90", "windSpeed": "9", "icon": "305"},
-        ]}
+    def test_today_activity_uses_forecast_and_provider_apparent_temperature(self):
+        start = dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+        self.activity.update(start_date=start.isoformat(), start_date_local=start.replace(tzinfo=None).isoformat() + "Z",
+                             moving_time=0)
+        sample = start.timestamp()
+        self.scenario["weather"]["minutely_15"]["time"] = [sample, sample + 900, sample + 1800]
+        self.assert_success(self.sync("--activity-id", "123"))
+        weather = next(entry for entry in self.requests() if entry["kind"] == "weather")
+        parsed = urlsplit(weather["url"])
+        self.assertEqual(parsed.netloc, "api.open-meteo.com")
+        self.assertIn("apparent_temperature", parse_qs(parsed.query)["minutely_15"][0].split(","))
+        description = self.requests()[-1]["body"]["description"]
+        self.assertIn("温度: 20.00°C - 20.00°C  体感温度: 30.00°C - 30.00°C", description)
+        self.assertTrue(description.endswith("Not Powered By www.gearaut.com 🍚"))
 
-    def test_qweather_config_drives_sync_and_replaces_previous_provider_block(self):
-        self.configure_qweather()
-        self.scenario["fresh"]["description"] += "\n" + BLOCK
-        self.assert_success(self.sync("--activity-id", "123", "--force"))
-        requests = self.requests()
-        weather = [entry for entry in requests if entry["kind"] == "weather"]
-        self.assertEqual(len(weather), 2)
-        query = parse_qs(urlsplit(weather[0]["url"]).query)
-        self.assertEqual(query["location"], ["116.40,39.90"])
-        query = parse_qs(urlsplit(weather[1]["url"]).query)
-        self.assertEqual(query["location"], ["101010100"])
-        self.assertEqual(query["unit"], ["m"])
-        body = requests[-1]["body"]
-        self.assertEqual(body["name"], "晨跑 🌞")
-        self.assertIn("温度: 20.50°C - 22.50°C", body["description"])
-        self.assertTrue(body["description"].endswith("Not Powered By www.gearaut.com 🍚"))
-        self.assertIn("体感温度: 20.78°C - 23.93°C", body["description"])
-        self.assertEqual(body["description"].count("体感温度:"), 1)
-        self.assertIn("https://summitbag.com/example", body["description"])
-        self.clear_requests()
-        self.scenario["activity"]["description"] = body["description"]
-        self.scenario["fresh"]["description"] = body["description"]
-        self.assert_success(self.sync("--force"))
-        self.assertEqual(self.requests()[-1]["body"]["description"].count("体感温度:"), 1)
-        self.assertEqual(self.requests()[-1]["body"]["description"], body["description"])
-
-    def test_provider_flag_overrides_config_and_qweather_blocks_are_recognized(self):
-        self.configure_qweather()
-        self.assert_success(self.sync("--weather-provider", "open-meteo"))
-        self.assertIn("open-meteo.com/", next(entry["url"] for entry in self.requests() if entry["kind"] == "weather"))
-        self.state.unlink()
-        self.clear_requests()
-        for apparent in ("", "  体感温度: 20.00°C - 22.00°C"):
-            with self.subTest(apparent=apparent):
-                self.state.unlink(missing_ok=True)
-                self.clear_requests()
-                self.scenario["activity"]["description"] = (
-                    f"温度: 20.00°C - 22.00°C{apparent}\n湿度: 60.00% - 70.00%  风速: 3.00 km/h - 5.00 km/h\n"
-                    "Powered By QWeather (www.qweather.com)")
-                self.assert_success(self.sync())
-                self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "existing"})
-                self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
-
-    def test_switching_from_qweather_preserves_notes_and_removes_old_block(self):
+    def test_legacy_weather_replacement_preserves_surrounding_notes(self):
         self.scenario["fresh"]["description"] += (
             "\n温度: 20.00°C - 22.00°C\n湿度: 60.00% - 70.00%  风速: 3.00 km/h - 5.00 km/h\n"
             "Powered By QWeather (www.qweather.com)\n末尾备注")
@@ -245,25 +195,6 @@ class SyncTests(unittest.TestCase):
         self.assertNotIn("Powered By QWeather", description)
         self.assertIn("末尾备注", description)
         self.assertIn("https://summitbag.com/example", description)
-
-    def test_qweather_unavailable_and_rate_limited_work_remains_pending(self):
-        self.configure_qweather()
-        for payload in ({"code": "429"}, {"code": "402"}, {"code": "200", "weatherHourly": []}):
-            with self.subTest(payload=payload):
-                self.scenario["qweather"] = payload
-                self.assertNotEqual(self.sync().returncode, 0)
-                state = json.loads(self.state.read_text())
-                self.assertEqual(state["activities"], {})
-                self.assertIn("123", state["pending"])
-                self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
-        self.configure_qweather()
-        self.assert_success(self.sync())
-
-    def test_qweather_dry_run_preserves_state(self):
-        self.configure_qweather()
-        self.assert_success(self.sync("--dry-run"))
-        self.assertFalse(self.state.exists())
-        self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
 
     def test_current_weather_signature_is_skipped_without_weather_requests(self):
         self.scenario["activity"]["description"] = BLOCK.replace(
@@ -560,136 +491,6 @@ class WeatherMathTests(unittest.TestCase):
                 with self.subTest(signature=signature, newline=newline):
                     block = BLOCK.replace("Powered By www.gearaut.com", signature).replace("\n", newline)
                     self.assertTrue(module.has_weather("原备注" + newline + block))
-
-    def test_steadman_formula_and_wind_units(self):
-        module = self.load_module()
-        for arguments, expected in (((0, 0, 0), -4), ((0, 100, 0), -1.98535),
-                                    ((20, 0, 36), 9), ((30, 70, 18), 32.268)):
-            with self.subTest(arguments=arguments):
-                self.assertAlmostEqual(module.steadman_apparent_temperature(*arguments), expected, places=3)
-        for arguments in ((None, 50, 3), (True, 50, 3), (float("nan"), 50, 3),
-                          (20, -1, 3), (20, 101, 3), (20, 50, -1), (20, 50, float("inf"))):
-            with self.subTest(arguments=arguments), self.assertRaises(module.SyncError):
-                module.steadman_apparent_temperature(*arguments)
-
-    def test_qweather_steadman_calculates_from_interpolated_inputs_and_interior_samples(self):
-        module = self.load_module()
-        start = dt.datetime(2026, 10, 12, 8, tzinfo=dt.timezone.utc)
-        activity = {"start_date": (start + dt.timedelta(seconds=900)).isoformat(),
-                    "start_date_local": "2026-10-12T16:15:00Z", "moving_time": 5400}
-        series = {"time": [start.timestamp(), start.timestamp() + 3600, start.timestamp() + 7200],
-                  "temperature_2m": [20, 30, 20], "relative_humidity_2m": [40, 80, 40],
-                  "wind_speed_10m": [3.6, 10.8, 3.6], "weather_code": [0, 0, 0]}
-        with patch.object(module, "qweather_series", return_value=series):
-            emoji, description = module.weather_annotation(activity, (39.9, 116.4), "qweather")
-        self.assertEqual(emoji, "🌞🥵")
-        self.assertIn("体感温度: 21.93°C - 35.06°C", description)
-        self.assertTrue(module.has_weather(description))
-        for field in ("temperature_2m", "relative_humidity_2m", "wind_speed_10m"):
-            incomplete = dict(series, **{field: [20, None, 20]})
-            with self.subTest(field=field), patch.object(module, "qweather_series", return_value=incomplete):
-                with self.assertRaises(module.SyncError):
-                    module.weather_annotation(activity, (39.9, 116.4), "qweather")
-
-    def test_qweather_steadman_heat_and_cold_emoji_thresholds(self):
-        module = self.load_module()
-        start = dt.datetime(2026, 10, 12, 8, tzinfo=dt.timezone.utc)
-        activity = {"start_date": start.isoformat(), "start_date_local": "2026-10-12T16:00:00Z", "moving_time": 0}
-        for temperature, humidity, wind, expected in ((30, 70, 18, "🌞🥵"), (5, 50, 18, "🌞🥶"),
-                                                       (34, 0, 0, "🌞"), (4, 0, 0, "🌞")):
-            series = {"time": [start.timestamp()], "temperature_2m": [temperature],
-                      "relative_humidity_2m": [humidity], "wind_speed_10m": [wind], "weather_code": [0]}
-            with self.subTest(temperature=temperature, humidity=humidity), \
-                    patch.object(module, "qweather_series", return_value=series):
-                self.assertEqual(module.weather_annotation(activity, (39.9, 116.4), "qweather")[0], expected)
-
-    def test_qweather_cross_day_requests_use_city_timezone_and_complete_boundaries(self):
-        module = self.load_module()
-        start = dt.datetime(2026, 10, 12, 15, 50, tzinfo=dt.timezone.utc).timestamp()
-        now = dt.datetime(2026, 10, 15, tzinfo=dt.timezone.utc)
-        calls = []
-
-        def request(path, parameters):
-            calls.append((path, parameters))
-            if path.startswith("/geo/"):
-                return {"location": [{"id": "101010100", "tz": "Asia/Shanghai"}]}
-            date = "2026-10-12" if parameters["date"] == "20261012" else "2026-10-13"
-            hours = [23] if date.endswith("12") else [0, 1]
-            return {"weatherHourly": [
-                {"time": f"{date} {hour:02d}:00", "temp": "20", "humidity": "60",
-                 "windSpeed": "3", "icon": "305"} for hour in hours]}
-
-        with patch.object(module, "qweather_request", side_effect=request):
-            series = module.qweather_series((39.9, 116.4), start, start + 1200, now=now)
-        self.assertEqual([parameters["date"] for path, parameters in calls[1:]], ["20261012", "20261013"])
-        self.assertEqual(series["time"], [start - 3000, start + 600, start + 4200])
-        self.assertEqual(series["weather_code"], [61, 61, 61])
-
-    def test_qweather_today_and_expired_history_are_retryable(self):
-        module = self.load_module()
-        now = dt.datetime(2026, 10, 15, 8, tzinfo=dt.timezone.utc)
-        for start in (now.timestamp() - 3600, now.timestamp() - 12 * 86400):
-            with patch.object(module, "qweather_request", return_value={
-                    "location": [{"id": "101010100", "tz": "Asia/Shanghai"}]}) as request:
-                with self.assertRaises(module.SyncError):
-                    module.qweather_series((39.9, 116.4), start, start + 1200, now=now)
-                self.assertEqual(request.call_count, 1)
-
-    def test_qweather_icon_categories(self):
-        module = self.load_module()
-        for icon, expected in ((100, 0), (150, 0), (101, 2), (153, 2), (104, 3), (302, 95), (399, 61),
-                               (456, 71), (504, 45), (507, 45)):
-            self.assertEqual(module.qweather_code(str(icon)), expected)
-        with self.assertRaises(module.SyncError):
-            module.qweather_code("999")
-
-    def test_qweather_auth_gzip_and_safe_errors(self):
-        import gzip
-        module = self.load_module()
-        environment = {"QWEATHER_API_HOST": "test.qweatherapi.com", "QWEATHER_API_KEY": "test-weather-key"}
-        for auth in ({"QWEATHER_API_KEY": "test-weather-key"}, {"QWEATHER_JWT": "test-jwt"}):
-            with patch.dict(os.environ, {**environment, "QWEATHER_API_KEY": "", **auth}, clear=True), \
-                    patch.object(module.urllib.request, "urlopen", return_value=io.BytesIO(
-                        gzip.compress(b'{"code":"200"}'))) as request:
-                self.assertEqual(module.qweather_request("/v7/historical/weather", {}), {"code": "200"})
-                outgoing = request.call_args.args[0]
-                self.assertNotIn(next(iter(auth.values())), outgoing.full_url)
-                header = "Authorization" if "QWEATHER_JWT" in auth else "X-qw-api-key"
-                self.assertIn(next(iter(auth.values())), outgoing.get_header(header))
-        for status in (401, 403, 429):
-            with patch.dict(os.environ, environment, clear=True), patch.object(
-                    module.urllib.request, "urlopen", side_effect=urllib.error.HTTPError(
-                        "https://test.qweatherapi.com/", status, "test-weather-key", {}, None)):
-                with self.assertRaises(module.StopBatchError) as error:
-                    module.qweather_request("/v7/historical/weather", {})
-                self.assertNotIn("test-weather-key", str(error.exception))
-
-    def test_qweather_fractional_timezone_requests_next_local_day_for_interpolation(self):
-        module = self.load_module()
-        start = dt.datetime(2026, 10, 12, 17, 35, tzinfo=dt.timezone.utc).timestamp()
-        calls = []
-
-        def request(path, parameters):
-            calls.append(parameters)
-            if path.startswith("/geo/"):
-                return {"location": [{"id": "city-id", "tz": "Asia/Kathmandu"}]}
-            time = "2026-10-12 23:00" if parameters["date"] == "20261012" else "2026-10-13 00:00"
-            return {"weatherHourly": [{"time": time, "temp": "20", "humidity": "60", "windSpeed": "3", "icon": "100"}]}
-
-        with patch.object(module, "qweather_request", side_effect=request):
-            series = module.qweather_series((27.7, 85.3), start, start + 600,
-                                           now=dt.datetime(2026, 10, 15, tzinfo=dt.timezone.utc))
-        self.assertEqual([parameters["date"] for parameters in calls[1:]], ["20261012", "20261013"])
-        self.assertEqual(module.interval_extrema(series["time"], series["temperature_2m"], start, start + 600), (20, 20))
-
-    def test_qweather_config_rejects_invalid_host_and_header_values(self):
-        module = self.load_module()
-        for host, key in (("", "test"), ("https://test.qweatherapi.com", "test"),
-                          ("attacker.example", "test"), ("test.qweatherapi.com", ""),
-                          ("test.qweatherapi.com", "secret\nHeader: injected")):
-            with patch.dict(os.environ, {"QWEATHER_API_HOST": host, "QWEATHER_API_KEY": key}, clear=True):
-                with self.assertRaises(module.SyncError):
-                    module.qweather_config()
 
     def test_boundaries_interior_extremes_and_invalid_data(self):
         module = self.load_module()
