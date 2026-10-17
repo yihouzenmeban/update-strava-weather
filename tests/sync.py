@@ -100,7 +100,7 @@ urllib.request.urlopen = urlopen
 '''
 
 
-class SyncTests(unittest.TestCase):
+class SyncFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="strava-sync-")
         self.addCleanup(self.temporary.cleanup)
@@ -157,6 +157,8 @@ class SyncTests(unittest.TestCase):
     def assert_success(self, result):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+
+class SyncTests(SyncFixture):
     def test_missing_weather_is_written_once_and_cached_with_private_permissions(self):
         self.assert_success(self.sync())
         requests = self.requests()

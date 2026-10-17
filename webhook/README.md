@@ -3,7 +3,12 @@
 Strava 新活动产生时，官方 webhook 把事件推送到你的公网回调地址，
 `receiver.py` 收到后等 60 秒（等 Strava 处理完活动的 GPS 和标题），
 再触发 `update_strava_weather.sh sync --activity-id <id>` 拉详情、
-查 Open-Meteo 天气、写回活动。每个新活动只花 2 次 Strava API 调用。
+需要时查 Open-Meteo 天气、写回活动。起点坐标完整时，新补天气或仅调整山峰排序
+使用 3 次 Strava API 调用（读详情、写入前再读、更新）；默认开启排序且无需修改时只读 1 次详情。
+已处理活动也会按默认配置检查后来追加的山峰数据；可设置 `REORDER_SUMMITBAG=0` 关闭。
+
+接收器只触发 `activity/create`，`activity/update` 和 `activity/delete` 均仅回复 200。
+创建事件处理完成后才追加的山峰数据，依靠定时 `sync` 再次扫描，或手动指定活动 ID 同步。
 
 ## 文件
 
@@ -33,3 +38,22 @@ Strava 新活动产生时，官方 webhook 把事件推送到你的公网回调�
    `callback_url=https://你的域名/strava-webhook`、
    `verify_token=`（`webhook/receiver_config.json` 里自动生成的）。
    再 `GET /push_subscriptions` 确认。
+
+## 本地模拟验证
+
+在仓库根目录运行：
+
+```bash
+python3 tests/webhook.py
+# 或
+bash tests/regression.sh webhook
+```
+
+测试通过临时本机 HTTP 服务发送真实 POST，请求经过 `receiver.py`、后台子进程和真实的
+`sync --activity-id` 流程；Strava / Open-Meteo 使用模拟响应，凭据、活动和处理记录全部位于
+临时目录。仅测试替换 `sleep` 命令跳过 60 秒等待，生产触发命令和延迟保持原样。
+
+覆盖 13 种描述场景：旧 gearaut、当前默认、幽灵署名、QWeather、多行山峰与备注（LF / CRLF）、
+自定义模板与无域名山峰行、顺序正确、无山峰、关闭排序、无法定位旧天气，以及缺天气时补齐。
+另覆盖重复创建事件、后台写入失败后重试、等待后台任务时先回复 HTTP 200，以及更新、删除、
+其它对象和非 JSON 事件不触发同步。
