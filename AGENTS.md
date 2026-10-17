@@ -3,7 +3,7 @@
 ## 项目结构与模块职责
 
 - `update_strava_weather.sh` 是命令入口，`strava_common.sh` 负责凭据与 HTTP 请求；`strava_oauth.py` 处理授权，`strava_sync.py` 负责活动发现、重试、并发锁和天气计算。
-- `weather_template.py` 处理描述渲染与山峰排序；`project_config.py` 统一加载 `config.default.json` 与私有的 `config.local.json`，默认模板正文也在默认配置中。`backfill_all.sh`、`reorder_summitbag.sh` 提供维护命令。
+- `weather_template.py` 处理标题、描述渲染与山峰排序；`project_config.py` 统一加载 `config.default.json` 与私有的 `config.local.json`，默认模板正文也在默认配置中。`backfill_all.sh`、`reorder_summitbag.sh` 提供维护命令。
 - `webhook/` 包含接收器、部署脚本和 systemd 模板；`tests/` 存放隔离回归测试。个人集成通过各机器的 webhook hooks 配置接入。
 
 ## Agent 入口与技能维护

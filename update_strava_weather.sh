@@ -3,7 +3,7 @@
 # 一站式脚本：换令牌 / 自动刷新 / 拉取当前活动 / 追加天气标题和描述
 #
 # 行为：脚本会先拉取活动当前的 name 和 description，
-#   - 标题：去掉末尾已有的天气 emoji 后，追加 WEATHER_EMOJI（如 "☁️🥵"）
+#   - 标题：按 title.template 渲染，默认去掉末尾旧天气 emoji 后追加 WEATHER_EMOJI
 #   - 描述：去掉旧天气块（兼容旧署名和 "Not Powered By www.gearaut.com 🍚"），追加 WEATHER_DESC
 #   即"追加"而非"覆盖"。
 #
@@ -208,10 +208,10 @@ do_update() (
   # 2) 计算追加后的 name / description，写到 body 文件
   WEATHER_EMOJI="$WEATHER_EMOJI" WEATHER_DESC="$WEATHER_DESC" \
     python3 - "$work_dir/activity.json" "$body_file" "$SCRIPT_DIR" <<'PY'
-import json, sys, os, re
+import json, sys, os
 
 sys.path.insert(0, sys.argv[3])
-from weather_template import load_template, reorder_summitbag, strip_weather
+from weather_template import load_template, render_title, reorder_summitbag, strip_weather
 
 try:
     template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
@@ -251,11 +251,7 @@ else:
     emoji = os.environ["WEATHER_EMOJI"].strip()
     block = os.environ["WEATHER_DESC"].strip()
 
-    # 标题：去掉末尾已有的天气 emoji（含 variation selector、空格），再追加新 emoji
-    # 覆盖：符号区 U+2600-U+27BF、象形区 U+1F300-U+1F5FF、补充区 U+1F900-U+1F9FF（含 🥵🥶）
-    emoji_tail = re.compile(r'[\s️‍☀-➿\U0001F300-\U0001F5FF\U0001F900-\U0001F9FF]+$')
-    name_base = emoji_tail.sub('', name)
-    new_name = (name_base + " " + emoji).strip() if emoji else name_base
+    new_name = render_title(name, emoji)
 
     # 描述：去掉旧天气块（兼容历史署名），再追加新块
     try:

@@ -210,6 +210,15 @@ class ScriptSecurityTests(unittest.TestCase):
                 self.assertEqual(writes, [expected] if expected else [])
                 self.assertEqual(list(self.runtime.iterdir()), [])
 
+    def test_manual_updates_use_the_shared_title_template(self):
+        path = self.directory / "config.local.json"
+        config = json.loads(path.read_text())
+        config["title"] = {"template": "{emoji} | {title}"}
+        path.write_text(json.dumps(config))
+        self.assert_success(self.run_script("update_strava_weather.sh", ACTIVITY_ID="123", YES="1", WEATHER_EMOJI="🌞"))
+        writes = [entry["body"] for entry in self.requests() if entry["method"] == "PUT"]
+        self.assertEqual(writes, [{"name": "🌞 | 晨跑"}])
+
     def test_snapshot_must_match_the_target_activity(self):
         snapshot = self.directory / "snapshot.json"
         snapshot.write_text(json.dumps({"id": 999, "name": "其它活动", "description": "重要备注"}))

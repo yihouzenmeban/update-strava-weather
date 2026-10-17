@@ -35,6 +35,34 @@ class TemplateTests(unittest.TestCase):
     def test_default_output_is_unchanged(self):
         self.assertEqual(load_template().render(VALUES), DEFAULT)
 
+    def test_default_title_template_keeps_existing_behavior(self):
+        from weather_template import TitleTemplate
+        template = TitleTemplate("{title} {emoji}")
+        for original in ("晨跑", "晨跑 🌞", "晨跑 ☀️ "):
+            with self.subTest(original=original):
+                self.assertEqual(template.render(original, "🌧️🥵"), "晨跑 🌧️🥵")
+        self.assertEqual(template.render("晨跑 🌞", ""), "晨跑")
+        self.assertEqual(template.render(" 晨跑 🌞", ""), " 晨跑")
+        self.assertEqual(template.render("晨骑 🚴", "🌧️🥵"), "晨骑 🚴 🌧️🥵")
+
+    def test_custom_title_template_is_idempotent_and_updates_emoji(self):
+        from weather_template import TitleTemplate
+        for source in ("{emoji} | {title} · 跑步", "跑步｜{title} {emoji}", "{title}", "{{路线}} {title} {emoji}"):
+            with self.subTest(source=source):
+                template = TitleTemplate(source)
+                first = template.render("晨跑 🌞", "🌧️🥵")
+                self.assertEqual(template.render(first, "🌧️🥵"), first)
+                self.assertEqual(template.render(first, "🌙"), template.render("晨跑", "🌙"))
+        empty = TitleTemplate("{emoji} | {title}")
+        self.assertEqual(empty.render(empty.render("晨跑", ""), ""), "| 晨跑")
+
+    def test_disabled_title_preserves_the_complete_original(self):
+        from weather_template import render_title
+        import weather_template
+        local = weather_template.ROOT / "config.local.json"
+        local.write_text('{"title": {"enabled": false}}')
+        self.assertEqual(render_title("晨跑 🏔️", "🌧️"), "晨跑 🏔️")
+
     def test_custom_precision_emoji_and_escaped_braces(self):
         template = WeatherTemplate("{{天气}} {emoji}\n气温 {t_min:.1f}～{t_max:.0f}°C\n风 {w_max} km/h\n")
         self.assertEqual(template.render(VALUES), "{天气} 🌧️🥵\n气温 22.0～26°C\n风 9.00 km/h")

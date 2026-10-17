@@ -154,6 +154,41 @@ class SyncFixture(unittest.TestCase):
 
 
 class SyncTests(SyncFixture):
+    def test_custom_title_is_used_in_preview_updates_and_repeated_force(self):
+        path = self.directory / "config.local.json"
+        path.write_text(json.dumps(dict(self.config, title={"template": "{emoji} | {title} · 跑步"})))
+        self.assert_success(self.sync("--activity-id", "123", "--dry-run"))
+        self.assertFalse(any(item.get("method") == "PUT" for item in self.requests()))
+        self.clear_requests()
+        self.assert_success(self.sync("--activity-id", "123"))
+        body = self.requests()[-1]["body"]
+        self.assertEqual(body["name"], "🌧️🥵 | 晨跑 · 跑步")
+        self.scenario["activity"].update(body)
+        self.clear_requests()
+        self.assert_success(self.sync("--activity-id", "123", "--force"))
+        self.assertFalse(any(item.get("method") == "PUT" for item in self.requests()))
+
+    def test_title_can_be_disabled_without_affecting_weather(self):
+        (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"enabled": False})))
+        self.activity["name"] = "晨跑 🏔️"
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertEqual(set(self.requests()[-1]["body"]), {"description"})
+
+    def test_custom_title_does_not_change_reorder_only_activities(self):
+        (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"template": "{emoji} | {title}"})))
+        self.activity.update(description=BLOCK + "\n" + MOUNTAINS, start_latlng=None)
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertEqual(self.requests()[-1]["body"], {"description": MOUNTAINS + "\n" + BLOCK})
+        self.assertFalse(any(item["kind"] == "weather" for item in self.requests()))
+
+    def test_invalid_title_fails_before_any_requests_or_state_updates(self):
+        (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"template": "{wrong}"})))
+        result = self.sync("--activity-id", "123")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("标题模板", result.stderr)
+        self.assertEqual(self.requests(), [])
+        self.assertFalse(self.state.exists())
+
     def test_inline_template_and_scan_defaults_come_from_shared_config(self):
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config,
             weather={"template": "天气 {t_min:.1f}～{t_max:.1f}°C"}, sync={"page_size": 17, "lookback_days": 2})))

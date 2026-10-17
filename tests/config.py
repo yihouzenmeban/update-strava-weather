@@ -49,6 +49,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["sync"]["page_size"], 50)
         self.assertIn("{t_min:.2f}", config["weather"]["template"])
 
+    def test_title_defaults_and_partial_customization(self):
+        self.assertEqual(self.load()["title"], {"enabled": True, "template": "{title} {emoji}"})
+        self.write({"title": {"template": "{emoji} | {title}"}})
+        self.assertEqual(self.load()["title"], {"enabled": True, "template": "{emoji} | {title}"})
+        self.write({"title": {"enabled": False}})
+        self.assertFalse(self.load()["title"]["enabled"])
+
+    def test_invalid_title_templates_are_rejected(self):
+        for template in ("", "{emoji}", "{title} {title}", "{title} {emoji}{emoji}",
+                         "{title.real}", "{title!r}", "{title:>10}", "{title}\n{emoji}", "{title} {unknown}", "{title"):
+            with self.subTest(template=template):
+                self.write({"title": {"template": template}})
+                with self.assertRaisesRegex(ValueError, "标题模板"):
+                    self.load()
+
     def test_environment_overrides_custom_config_with_typed_values(self):
         self.write({"weather": {"reorder_summitbag": False}, "webhook": {"sync_delay_seconds": 120}})
         config = self.load(environ={"REORDER_SUMMITBAG": "1", "WEBHOOK_SYNC_DELAY_SECONDS": "0",

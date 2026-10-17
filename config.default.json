@@ -6,6 +6,10 @@
     "list_count": 1,
     "token_refresh_margin_seconds": 60
   },
+  "title": {
+    "enabled": true,
+    "template": "{title} {emoji}"
+  },
   "weather": {
     "template": "温度: {t_min:.2f}°C - {t_max:.2f}°C  体感温度: {at_min:.2f}°C - {at_max:.2f}°C\n湿度: {h_min:.2f}% - {h_max:.2f}%  风速: {w_min:.2f} km/h - {w_max:.2f} km/h\nNot Powered By www.gearaut.com 🍚",
     "template_file": "",

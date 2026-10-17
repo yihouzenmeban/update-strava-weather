@@ -1,10 +1,10 @@
-"""Render plain-text weather templates and locate their blocks in descriptions."""
+"""Render activity titles and weather templates; locate weather description blocks."""
 
 from pathlib import Path
 import re
 from string import Formatter
 
-from project_config import load_config
+from project_config import load_config, title_template_parts
 
 
 ROOT = Path(__file__).resolve().parent
@@ -18,6 +18,41 @@ LEGACY_BLOCK = re.compile(
     r"(?:Not Powered By www\.gearaut\.com [🍚👻]|Powered By "
     r"(?:www\.gearaut\.com|QWeather \(www\.qweather\.com\)))[ \t]*\r?$", re.M,
 )
+# Preserve the previous title cleanup behavior for the default template.
+TITLE_EMOJI_TAIL = re.compile(r'[\s️‍☀-➿\U0001F300-\U0001F5FF\U0001F900-\U0001F9FF]+$')
+
+
+class TitleTemplate:
+    def __init__(self, source):
+        self.parts = title_template_parts(source)
+        self.legacy_layout = source.strip() == "{title} {emoji}"
+        pattern = []
+        for literal, field, _, _ in self.parts:
+            pattern.extend(r"[ \t]*" if part.isspace() else re.escape(part)
+                           for part in re.split(r"([ \t]+)", literal) if part)
+            if field == "title":
+                pattern.append(r"(?P<title>.*?)")
+            elif field == "emoji":
+                pattern.append("(?:" + TITLE_EMOJI_TAIL.pattern[:-1] + ")?")
+        self.pattern = re.compile("".join(pattern), re.S)
+
+    def render(self, title, emoji):
+        if self.legacy_layout:
+            base = TITLE_EMOJI_TAIL.sub("", title)
+            return (base + " " + emoji).strip() if emoji else base
+        # Unwrap this layout before rendering it again, so prefixes do not stack.
+        matched = self.pattern.fullmatch(title)
+        base = matched.group("title") if matched else title
+        values = {"title": TITLE_EMOJI_TAIL.sub("", base), "emoji": emoji.strip()}
+        return "".join(literal + (values[field] if field else "")
+                       for literal, field, _, _ in self.parts).strip()
+
+
+def render_title(title, emoji):
+    config = load_config(ROOT)["title"]
+    if not config["enabled"]:
+        return title
+    return TitleTemplate(config["template"]).render(title, emoji)
 
 
 class WeatherTemplate:

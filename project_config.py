@@ -10,6 +10,7 @@ import re
 import secrets
 import shlex
 import stat
+from string import Formatter
 import subprocess
 import sys
 import tempfile
@@ -76,7 +77,26 @@ def merge(base, overrides, prefix=""):
     return result
 
 
+def title_template_parts(source):
+    if not source.strip() or any(char in source for char in "\r\n\0"):
+        raise ValueError("标题模板必须为非空单行文本")
+    try:
+        parts = list(Formatter().parse(source.strip()))
+    except ValueError:
+        raise ValueError("标题模板括号格式错误") from None
+    fields = []
+    for _, field, spec, conversion in parts:
+        if field is not None:
+            if field not in ("title", "emoji") or spec or conversion:
+                raise ValueError("标题模板仅支持 {title} 和 {emoji}，不支持表达式、转换或格式说明")
+            fields.append(field)
+    if fields.count("title") != 1 or fields.count("emoji") > 1:
+        raise ValueError("标题模板必须包含一次 {title}，{emoji} 最多出现一次")
+    return parts
+
+
 def validate(config):
+    title_template_parts(config["title"]["template"])
     limits = {("sync", "page_size"): (1, 200), ("webhook", "sync_delay_seconds"): (0, None),
               ("webhook", "listen_port"): (1, 65535), ("sync", "lookback_days"): (1, None)}
     for section in ("http", "backfill", "reorder"):
