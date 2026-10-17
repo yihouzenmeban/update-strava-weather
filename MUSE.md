@@ -155,12 +155,30 @@ chmod +x backfill_all.sh
 不阻塞 200 响应；输出记到 `webhook/logs/hook-<name>-<活动ID>.log`。
 改完重启 receiver 生效。
 
+### 9. 保活看门狗（必做）
+
+Muse 的 VM 会频繁整体替换（有时几小时一次），每次 `/etc/systemd/system`
+都会被清空，webhook 服务不会自己回来。平台没有开机自启机制，
+只能靠定时恢复任务。
+
+创建一个每 15 分钟的 cron（用 Muse 的 cron 工具创建，它是平台托管的，
+VM 重启不受影响）：
+
+- 每轮 `sudo systemctl is-active strava-webhook-receiver.service strava-webhook-tunnel.service`；
+- 任一不是 active：跑 `sudo bash webhook/ensure.sh` 重装启动；
+- 恢复后跑一次 `./update_strava_weather.sh sync` 增量兜底
+  （幂等，把掉线期间错过的活动补回来；撞 429 会自己退出）；
+- 全正常时静默，只在恢复/失败时通知用户。
+
+15 分钟是推荐值：VM 重启一天就几次，恢复又有增量兜底，
+5 分钟一次除了多 3 倍的后台消耗，几乎没有额外收益。
+
 ## 排障（都是实战踩过的坑）
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
 | ngrok 报 `ERR_NGROK_9009` | 没开 Muse App 的「直接网络协议 → 其他 TCP 连接」 |
-| VM 重启后新活动不再自动标注 | `/etc/systemd/system` 是临时的，重启会丢 unit；重跑 `sudo bash webhook/ensure.sh` |
+| VM 重启后新活动不再自动标注 | `/etc/systemd/system` 是临时的，重启会丢 unit；看门狗（步骤 9）会在 15 分钟内自动恢复，恢复后增量同步会补回漏掉的活动；看门狗本身没跑起来时，手动重跑 `sudo bash webhook/ensure.sh` |
 | `sync` 报 429，但配额明明没用完 | 撞的是 **2000/天 read 档**，不是 4000 overall 档；等 UTC 午夜重置 |
 | 测试活动删不掉 | API 删不掉活动，去 App 里手动删 |
 | receiver 起不来，报配置错误 | `python3 project_config.py check` 看哪项缺了；`verify_token` 为空会自动生成 |
