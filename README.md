@@ -14,7 +14,7 @@
 - 山峰排序：默认将 summitbag / 山峰 emoji 行移到天气前，可配置关闭
 - 数据源：Open-Meteo（无需密钥；近期活动用 15 分钟 `minutely_15`，历史活动用 archive hourly）
 - 覆盖前预览确认（`show` / `DRY_RUN=1`）
-- 附带 Claude Code skill，可由 AI 端到端驱动
+- 附带共享 Agent 技能，Claude 入口通过软链复用
 
 ## 目录结构
 
@@ -31,7 +31,10 @@ update-strava-weather/
 ├── strava_config.sh                真实密钥（gitignore）
 ├── .strava_tokens.json             令牌缓存（gitignore，自动生成）
 ├── .strava_weather_state.json      扫描进度、处理记录和待处理队列（gitignore，自动生成）
-├── .claude/skills/strava-weather-update/SKILL.md   AI skill
+├── AGENTS.md                      共享中文贡献指南
+├── CLAUDE.md -> AGENTS.md          Claude 规则入口
+├── .agents/skills/strava-weather-update/SKILL.md   共享技能源文件
+├── .claude/skills -> ../.agents/skills             Claude 技能兼容入口
 ├── .gitignore
 └── README.md
 ```
@@ -267,9 +270,9 @@ Powered By www.gearaut.com
 
 ## AI Skill
 
-`.claude/skills/strava-weather-update/SKILL.md` 默认只调用一次 `./update_strava_weather.sh sync` 并报告结果，活动检查、天气计算和写入均由脚本完成。在本仓库目录下对 Claude 说"更新我最新活动的天气"即可触发，无需连接 Strava MCP。
+共享技能位于 `.agents/skills/strava-weather-update/SKILL.md`，`.claude/skills` 通过相对软链复用该目录。技能默认只调用一次 `./update_strava_weather.sh sync` 并报告结果，活动检查、天气计算和写入均由脚本完成。在本仓库目录下对 Claude 说"更新我最新活动的天气"即可触发，无需连接 Strava MCP。
 
-skill 优先使用活动的 `start_latlng`，缺少起点时再获取 `latlng` 坐标流；读写共用现有 OAuth 授权和令牌自动刷新。接口与权限见 [Strava 官方文档](https://developers.strava.com/docs/reference/)。
+只维护 `AGENTS.md` 和 `.agents/` 中的真实文件，`CLAUDE.md` 与 `.claude/skills` 保留为软链，避免多份内容不一致。脚本优先使用活动的 `start_latlng`，缺少起点时再获取 `latlng` 坐标流；读写共用现有 OAuth 授权和令牌自动刷新。接口与权限见 [Strava 官方文档](https://developers.strava.com/docs/reference/)。
 
 ## 注意
 
