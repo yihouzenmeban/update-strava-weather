@@ -10,6 +10,18 @@
 
 `AGENTS.md` 是共享规则源，`CLAUDE.md` 通过相对软链引用它。技能实际存放在 `.agents/skills/`，`.claude/skills` 软链到该目录。维护时修改真实文件并保留相对软链，使不同 Agent 共用同一份内容。
 
+按任务读取对应入口；日常代码修改不执行真实活动同步技能。
+
+| 任务 | 先读文档 / 代码 | 最快相关验证 |
+| --- | --- | --- |
+| 实际同步 Strava 活动 | `.agents/skills/strava-weather-update/SKILL.md` | 按用户意图执行并核对脚本结果 |
+| 修改同步与重试 | `strava_sync.py`；`README.md` 的用法 | `python3 tests/sync.py` |
+| 修改模板与山峰排序 | `weather_template.py`；`README.md` 的模板与排序说明 | `python3 tests/templates.py` |
+| 修改 webhook | `webhook/README.md`；`webhook/receiver.py` | `python3 tests/webhook.py` |
+| 修改授权与凭据处理 | `strava_oauth.py`、`strava_common.sh`、`update_strava_weather.sh` | `python3 tests/security.py`、`bash tests/regression.sh auth` |
+
+安装、命令及用户可见行为以 `README.md` 为入口；webhook 部署与排障集中在 `webhook/README.md`。技能只维护操作决策与结果处理，内部机制以代码和测试为准。
+
 ## 开发与验证命令
 
 运行环境需要 Bash、Python 3.9+ 和 curl，无需构建。
@@ -23,7 +35,7 @@ bash -n update_strava_weather.sh strava_common.sh
 git diff --check
 ```
 
-真实环境开发时，参考示例创建 `strava_config.sh`，再运行 `./update_strava_weather.sh login`。`./update_strava_weather.sh sync --dry-run` 会读取真实 API，但不更新活动或同步状态。
+本地开发优先运行隔离测试，无需配置真实凭据。实际同步前按 `README.md` 完成配置；`./update_strava_weather.sh sync --dry-run` 会读取真实 API，但不更新活动或同步状态。
 
 ## 代码风格与命名
 
