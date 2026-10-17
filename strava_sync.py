@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlencode
 
-from weather_template import has_weather, load_template
+from weather_template import has_weather, load_template, reorder_summitbag
 
 
 ROOT = Path(__file__).resolve().parent
@@ -223,8 +223,23 @@ def weather_annotation(activity, location, template=None):
     return emoji, description
 
 
+def update_activity(args, activity_id, emoji="", description="", force=False, reorder_only=False):
+    extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "", "WEATHER_DESC_FILE": "",
+             "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
+             "STRAVA_SYNC_CHECK_WEATHER": "0" if force else "1",
+             "STRAVA_REORDER_ONLY": "1" if reorder_only else "0",
+             "REORDER_SUMMITBAG": "1" if args.reorder_summitbag else "0",
+             "WEATHER_TEMPLATE_FILE": args.template}
+    result = invoke("show" if args.dry_run else "run", activity_id, extra)
+    if result.returncode not in (0, 2, 3):
+        raise script_error(result, "Strava 写入失败，未记录成功")
+    print(result.stdout.strip())
+    return {0: "updated", 2: "indoor", 3: "existing"}[result.returncode]
+
+
 def process_activity(args, activity_id, activities, force=False):
-    if not force and activity_id in activities:
+    cached = activity_id in activities
+    if not force and cached and (not args.reorder_summitbag or activities[activity_id] == "indoor"):
         print(f"⏭️ 活动 {activity_id} 已处理，跳过详情和天气查询")
         return None
     activity = read_strava("get", activity_id)
@@ -233,9 +248,12 @@ def process_activity(args, activity_id, activities, force=False):
     if activity.get("trainer") or str(activity.get("sport_type", "")).startswith("Virtual"):
         print(f"⏭️ 活动 {activity_id} 为室内活动，跳过")
         return "indoor"
-    if not force and has_weather(activity.get("description"), args.weather_template):
-        print(f"⏭️ 活动 {activity_id} 描述已有天气标注，跳过")
-        return "existing"
+    if not force and (cached or has_weather(activity.get("description"), args.weather_template)):
+        description = activity.get("description") or ""
+        if reorder_summitbag(description, args.weather_template, args.reorder_summitbag) != description:
+            return update_activity(args, activity_id, reorder_only=True)
+        print(f"⏭️ 活动 {activity_id} 天气已处理，山峰无需排序")
+        return None if cached else "existing"
     location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
     if location is None:
         streams = read_strava("streams", activity_id, allow_missing=True)
@@ -249,27 +267,20 @@ def process_activity(args, activity_id, activities, force=False):
     if location is None:
         raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
     emoji, description = weather_annotation(activity, location, args.weather_template)
-    extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "", "WEATHER_DESC_FILE": "",
-             "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
-             "STRAVA_SYNC_CHECK_WEATHER": "0" if force else "1",
-             "WEATHER_TEMPLATE_FILE": args.template}
-    result = invoke("show" if args.dry_run else "run", activity_id, extra)
-    if result.returncode not in (0, 2, 3):
-        raise script_error(result, "Strava 写入失败，未记录成功")
-    print(result.stdout.strip())
-    return {0: "updated", 2: "indoor", 3: "existing"}[result.returncode]
+    return update_activity(args, activity_id, emoji, description, force=force)
 
 
-def enqueue(state, activity_id, force):
+def enqueue(state, activity_id, force, reorder=False):
     if activity_id in state["pending"]:
         state["pending"][activity_id] = state["pending"][activity_id] or force
-    elif force or activity_id not in state["activities"]:
+    elif force or activity_id not in state["activities"] or (
+            reorder and state["activities"][activity_id] != "indoor"):
         state["pending"][activity_id] = force
 
 
 def discover(args, state, state_path, now):
     if args.activity_id is not None:
-        enqueue(state, args.activity_id, args.force)
+        enqueue(state, args.activity_id, args.force, args.reorder_summitbag)
         if not args.dry_run and args.activity_id in state["pending"]:
             save_state(state_path, state)
         return [args.activity_id] if args.activity_id in state["pending"] else []
@@ -309,7 +320,7 @@ def discover(args, state, state_path, now):
             raise SyncError("Strava 分页未推进，扫描进度未推进，请稍后重试")
         for activity_id in ids:
             found[activity_id] = None
-            enqueue(state, activity_id, args.force)
+            enqueue(state, activity_id, args.force, args.reorder_summitbag)
         if ids and not args.dry_run:
             save_state(state_path, state)
         if len(batch) < args.page_size:
@@ -337,12 +348,20 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写活动、队列或扫描进度")
     parser.add_argument("--template", default=os.environ.get("WEATHER_TEMPLATE_FILE") or "templates/weather.default.txt",
                         help="天气描述模板，优先于 WEATHER_TEMPLATE_FILE；相对路径以仓库根目录为准")
+    ordering = parser.add_mutually_exclusive_group()
+    ordering.add_argument("--reorder-summitbag", dest="reorder_summitbag", action="store_const", const="1",
+                          default=os.environ.get("REORDER_SUMMITBAG") or "1", help="将山峰数据移到天气前（默认开启）")
+    ordering.add_argument("--no-reorder-summitbag", dest="reorder_summitbag", action="store_const", const="0",
+                          help="关闭山峰排序，已处理活动按 ID 跳过")
     parser.add_argument("--latitude", type=float, help="指定单条活动的纬度")
     parser.add_argument("--longitude", type=float, help="指定单条活动的经度")
     args = parser.parse_args()
     args.dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
     if not args.template.strip():
         parser.error("--template 必须指定天气模板文件路径")
+    if args.reorder_summitbag not in ("0", "1"):
+        parser.error("REORDER_SUMMITBAG 必须为 0 或 1")
+    args.reorder_summitbag = args.reorder_summitbag == "1"
     if args.activity_id is not None and not re.fullmatch(r"[1-9][0-9]*", args.activity_id):
         parser.error("--activity-id 必须为正整数")
     if not 1 <= args.page_size <= 200:

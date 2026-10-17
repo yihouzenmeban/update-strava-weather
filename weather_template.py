@@ -91,3 +91,30 @@ def strip_weather(description, template=None):
     if "www.gearaut.com" in description:
         raise ValueError("检测到 www.gearaut.com，但无法定位旧天气块；请使用原模板或手动清理旧天气后重试")
     return description.strip()
+
+
+def reorder_summitbag(description, template=None, enabled=True):
+    """Move mountain lines after the weather ahead of it, preserving other text."""
+    if not enabled or not description:
+        return description
+    spans = weather_spans(description, template)
+    if not spans:
+        return description
+    newline = "\r\n" if "\r\n" in description else "\n"
+    remaining, mountains = [], []
+    offset, insertion = 0, 0
+    for line in description.splitlines(keepends=True):
+        end = offset + len(line)
+        if offset == spans[0][0]:
+            insertion = len(remaining)
+        is_mountain = "summitbag.com" in line or line.lstrip().startswith(("⛰", "🏔"))
+        inside_weather = any(offset < stop and end > start for start, stop in spans)
+        if offset >= spans[0][1] and is_mountain and not inside_weather:
+            mountains.append(line if line.endswith("\n") else line + newline)
+        else:
+            remaining.append(line)
+        offset = end
+    if not mountains:
+        return description
+    result = "".join(remaining[:insertion] + mountains + remaining[insertion:]).rstrip("\r\n")
+    return result + (newline if description.endswith("\n") else "")

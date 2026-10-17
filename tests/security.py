@@ -113,7 +113,7 @@ class ScriptSecurityTests(unittest.TestCase):
         self.runtime.mkdir()
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "WEATHER_DESC", "WEATHER_DESC_FILE",
-                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "CLIENT_SECRET", "CLIENT_ID"):
+                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG", "CLIENT_SECRET", "CLIENT_ID"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
                                 PYTHONPATH=str(self.directory), TMPDIR=str(self.runtime))

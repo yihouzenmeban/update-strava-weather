@@ -22,6 +22,7 @@
 #     ACTIVITY_ID            手动更新/get/streams 必填；sync 用 --activity-id 指定活动
 #     WEATHER_EMOJI          追加到标题的 emoji（可空，或用 WEATHER_EMOJI_FILE 指定文件）
 #     WEATHER_DESC           追加到描述的天气块（可空，或用 WEATHER_DESC_FILE 指定文件）
+#     REORDER_SUMMITBAG=0     关闭山峰数据排到天气前面（默认开启）
 #     DRY_RUN=1              仅预览不更新（等同 show 子命令）
 #     YES=1                  跳过确认直接更新（自动化/skill 用）
 #
@@ -36,9 +37,11 @@ set +x
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WEATHER_TEMPLATE_FROM_ENV="${WEATHER_TEMPLATE_FILE:-}"
+REORDER_SUMMITBAG_FROM_ENV="${REORDER_SUMMITBAG:-}"
 # shellcheck source=strava_common.sh
 source "$SCRIPT_DIR/strava_common.sh"
 export WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FROM_ENV:-${WEATHER_TEMPLATE_FILE:-}}"
+export REORDER_SUMMITBAG="${REORDER_SUMMITBAG_FROM_ENV:-${REORDER_SUMMITBAG:-1}}"
 
 # 要追加的天气 emoji 和天气描述块（可被环境变量覆盖，或用 *_FILE 指定文件路径，文件优先）
 WEATHER_EMOJI="${WEATHER_EMOJI:-}"
@@ -187,6 +190,7 @@ PY
 # 更新活动：拉取当前 name/description，去掉旧天气标注，追加新天气后 PUT
 do_update() (
   [[ "${ACTIVITY_ID:-}" =~ ^[1-9][0-9]*$ ]] || die "请通过环境变量 ACTIVITY_ID 指定有效的活动 ID（正整数）"
+  [[ "$REORDER_SUMMITBAG" == "0" || "$REORDER_SUMMITBAG" == "1" ]] || die "REORDER_SUMMITBAG 必须为 0 或 1"
 
   require_token
   local access work_dir body_file code
@@ -207,7 +211,7 @@ do_update() (
 import json, sys, os, re
 
 sys.path.insert(0, sys.argv[3])
-from weather_template import has_weather, load_template, strip_weather
+from weather_template import has_weather, load_template, reorder_summitbag, strip_weather
 
 try:
     template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
@@ -232,29 +236,36 @@ if (is_trainer or is_virtual) and os.environ.get("FORCE", "") != "1":
 
 name = act.get("name", "") or ""
 desc = act.get("description", "") or ""
-if os.environ.get("STRAVA_SYNC_CHECK_WEATHER") == "1":
-    if has_weather(desc, template):
-        print("⏭️ 活动已补上天气，保留最新内容，不重复写入")
+reorder_enabled = os.environ.get("REORDER_SUMMITBAG") == "1"
+reorder_only = os.environ.get("STRAVA_REORDER_ONLY") == "1" or (
+    os.environ.get("STRAVA_SYNC_CHECK_WEATHER") == "1" and has_weather(desc, template))
+if reorder_only:
+    new_name = name
+    new_desc = reorder_summitbag(desc, template, reorder_enabled)
+    if new_desc == desc:
+        print("⏭️ 保留最新天气，山峰无需排序，不重复写入")
         sys.exit(3)
-emoji = os.environ["WEATHER_EMOJI"].strip()
-block = os.environ["WEATHER_DESC"].strip()
-
-# 标题：去掉末尾已有的天气 emoji（含 variation selector、空格），再追加新 emoji
-# 覆盖：符号区 U+2600-U+27BF、象形区 U+1F300-U+1F5FF、补充区 U+1F900-U+1F9FF（含 🥵🥶）
-emoji_tail = re.compile(r'[\s️‍☀-➿\U0001F300-\U0001F5FF\U0001F900-\U0001F9FF]+$')
-name_base = emoji_tail.sub('', name)
-new_name = (name_base + " " + emoji).strip() if emoji else name_base
-
-# 描述：去掉旧天气块（兼容历史署名），再追加新块
-try:
-    desc_clean = strip_weather(desc, template)
-except ValueError as error:
-    print(f"❌ {error}", file=sys.stderr)
-    sys.exit(1)
-if block:
-    new_desc = (desc_clean + "\n" + block) if desc_clean else block
 else:
-    new_desc = desc_clean
+    emoji = os.environ["WEATHER_EMOJI"].strip()
+    block = os.environ["WEATHER_DESC"].strip()
+
+    # 标题：去掉末尾已有的天气 emoji（含 variation selector、空格），再追加新 emoji
+    # 覆盖：符号区 U+2600-U+27BF、象形区 U+1F300-U+1F5FF、补充区 U+1F900-U+1F9FF（含 🥵🥶）
+    emoji_tail = re.compile(r'[\s️‍☀-➿\U0001F300-\U0001F5FF\U0001F900-\U0001F9FF]+$')
+    name_base = emoji_tail.sub('', name)
+    new_name = (name_base + " " + emoji).strip() if emoji else name_base
+
+    # 描述：去掉旧天气块（兼容历史署名），再追加新块
+    try:
+        desc_clean = strip_weather(desc, template)
+    except ValueError as error:
+        print(f"❌ {error}", file=sys.stderr)
+        sys.exit(1)
+    if block:
+        new_desc = (desc_clean + "\n" + block) if desc_clean else block
+    else:
+        new_desc = desc_clean
+    new_desc = reorder_summitbag(new_desc, template, reorder_enabled)
 
 json.dump({"name": new_name, "description": new_desc},
           open(sys.argv[2], "w", encoding="utf-8"), ensure_ascii=False)

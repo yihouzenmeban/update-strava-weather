@@ -19,9 +19,16 @@ set +x
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WEATHER_TEMPLATE_FROM_ENV="${WEATHER_TEMPLATE_FILE:-}"
+REORDER_SUMMITBAG_FROM_ENV="${REORDER_SUMMITBAG:-}"
 # shellcheck source=strava_common.sh
 source "$SCRIPT_DIR/strava_common.sh"
 WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FROM_ENV:-${WEATHER_TEMPLATE_FILE:-}}"
+REORDER_SUMMITBAG="${REORDER_SUMMITBAG_FROM_ENV:-${REORDER_SUMMITBAG:-1}}"
+[[ "$REORDER_SUMMITBAG" == "0" || "$REORDER_SUMMITBAG" == "1" ]] || die "REORDER_SUMMITBAG 必须为 0 或 1"
+if [[ "$REORDER_SUMMITBAG" == "0" ]]; then
+  echo "⏭️ 山峰排序已关闭（REORDER_SUMMITBAG=0）"
+  exit 0
+fi
 
 if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
   die "请先创建 strava_config.sh 并填好 CLIENT_ID"
@@ -75,7 +82,7 @@ WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FILE:-}" ACCESS="$ACCESS" APPLY="$APPL
 import json, os, sys, time, urllib.request, urllib.error
 
 sys.path.insert(0, sys.argv[1])
-from weather_template import load_template, weather_spans
+from weather_template import load_template, reorder_summitbag
 
 try:
     template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
@@ -128,8 +135,6 @@ def req(method, url, data=None):
             time.sleep(10)
             continue
 
-SUMMIT_MARK = "summitbag.com"
-
 # 1) 分页拉全部活动，过滤 TrailRun
 print("→ 拉取活动列表...", flush=True)
 trails = []
@@ -156,21 +161,7 @@ for i, a in enumerate(trails, 1):
     desc = detail.get("description") or ""
     if not desc:
         continue
-    spans = weather_spans(desc, template)
-    sb_pos = desc.find(SUMMIT_MARK)
-    # 需要同时有天气块和 summitbag，且 summitbag 在天气之后
-    if not spans or sb_pos == -1 or sb_pos < spans[0][1]:
-        continue
-
-    # 目标顺序：备注 → summitbag → 天气块，其它内容和空行保持原顺序
-    lines = desc.split("\n")
-    wb_start = desc[:spans[0][0]].count("\n")
-    summit_lines = [l for l in lines if SUMMIT_MARK in l]
-    if not summit_lines:
-        continue
-    # summitbag 已确认位于天气块之后，移除后插到天气块起始位置即可
-    other_lines = [l for l in lines if SUMMIT_MARK not in l]
-    new_desc = "\n".join(other_lines[:wb_start] + summit_lines + other_lines[wb_start:])
+    new_desc = reorder_summitbag(desc, template)
     if new_desc == desc:
         continue
     changes.append({"id": aid, "name": detail.get("name", ""), "before": desc, "after": new_desc})

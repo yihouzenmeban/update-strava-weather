@@ -10,3 +10,7 @@ CLIENT_SECRET="在这里粘贴你的Client Secret"
 # 可选：自定义天气描述模板（UTF-8 文本，相对路径以仓库根目录为准）
 # 优先级：sync --template > 环境变量 WEATHER_TEMPLATE_FILE > 此处配置 > 默认模板
 # WEATHER_TEMPLATE_FILE="weather.custom.txt"
+
+# 默认将山峰数据移到天气前面；设为 0 可关闭，恢复已处理活动按 ID 跳过详情
+# sync 参数 > 环境变量 > 此处配置；--no-reorder-summitbag 关闭，--reorder-summitbag 开启
+# REORDER_SUMMITBAG=0

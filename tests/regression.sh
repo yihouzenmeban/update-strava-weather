@@ -108,6 +108,10 @@ EOF
   [[ "$occurrences" == "2" ]] || fail "custom reorder deleted trailing notes"
   [[ "$output" == *$'https://summitbag.com/example\n    | 我的天气 🌙'* ]] || fail "summitbag was not moved before custom weather"
   echo "PASS: reorder recognizes custom templates and preserves trailing text"
+
+  output=$(cd "$work_dir" && PYTHONPATH="$work_dir" REORDER_SUMMITBAG=0 YES=1 ./reorder_summitbag.sh)
+  [[ "$output" == *"山峰排序已关闭"* && "$output" != *"拉取活动列表"* ]] || fail "disabled reorder still queried activities"
+  echo "PASS: standalone reorder can be disabled before API requests"
 }
 
 test_read_commands() {
