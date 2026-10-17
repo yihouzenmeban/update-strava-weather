@@ -6,3 +6,7 @@
 
 CLIENT_ID="在这里粘贴你的Client ID"
 CLIENT_SECRET="在这里粘贴你的Client Secret"
+
+# 可选：自定义天气描述模板（UTF-8 文本，相对路径以仓库根目录为准）
+# 优先级：sync --template > 环境变量 WEATHER_TEMPLATE_FILE > 此处配置 > 默认模板
+# WEATHER_TEMPLATE_FILE="weather.custom.txt"

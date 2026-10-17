@@ -18,25 +18,12 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlencode
 
+from weather_template import has_weather, load_template
+
 
 ROOT = Path(__file__).resolve().parent
 FIELDS = ("temperature_2m", "apparent_temperature", "relative_humidity_2m", "wind_speed_10m")
 VARIABLES = ",".join(FIELDS + ("weather_code",))
-NUMBER = r"-?\d+(?:\.\d+)?"
-WEATHER_BLOCK = re.compile(
-    rf"^温度: {NUMBER}°C - {NUMBER}°C(?:  体感温度: {NUMBER}°C - {NUMBER}°C)?\r?\n"
-    rf"湿度: {NUMBER}% - {NUMBER}%  风速: {NUMBER} km/h - {NUMBER} km/h\r?\n"
-    r"(?:Not Powered By www\.gearaut\.com [🍚👻]|Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\)))(?:\r?$)", re.M,
-)
-
-# Title emojis appended by weather_annotation (must stay in sync with it).
-WEATHER_TITLE_EMOJIS = ("⛈️", "❄️", "🌧️", "🌫️", "🌙", "☁️", "⛅", "🌞", "💨", "🥵", "🥶")
-
-
-def has_weather_title(name):
-    """True if the activity title already ends with our weather emoji."""
-    tail = (name or "").rstrip()
-    return any(tail.endswith(emoji) for emoji in WEATHER_TITLE_EMOJIS)
 
 
 class SyncError(Exception):
@@ -45,10 +32,6 @@ class SyncError(Exception):
 
 class StopBatchError(SyncError):
     pass
-
-
-def has_weather(description):
-    return bool(WEATHER_BLOCK.search(description or ""))
 
 
 def private_open(path, flags):
@@ -182,7 +165,7 @@ def coordinates(value):
     return None
 
 
-def weather_annotation(activity, location):
+def weather_annotation(activity, location, template=None):
     try:
         start_date = dt.datetime.fromisoformat(activity["start_date"].replace("Z", "+00:00"))
         local_start = dt.datetime.fromisoformat(activity["start_date_local"].replace("Z", "+00:00")).replace(tzinfo=None)
@@ -232,9 +215,11 @@ def weather_annotation(activity, location):
     if ranges["apparent_temperature"][0] < 0:
         emoji += "🥶"
     temperature, apparent, humidity, wind = (ranges[field] for field in FIELDS)
-    description = (f"温度: {temperature[0]:.2f}°C - {temperature[1]:.2f}°C  体感温度: {apparent[0]:.2f}°C - {apparent[1]:.2f}°C\n"
-                   f"湿度: {humidity[0]:.2f}% - {humidity[1]:.2f}%  风速: {wind[0]:.2f} km/h - {wind[1]:.2f} km/h\n"
-                   "Not Powered By www.gearaut.com 🍚")
+    template = template if template is not None else load_template()
+    description = template.render(dict(t_min=temperature[0], t_max=temperature[1],
+                                       at_min=apparent[0], at_max=apparent[1],
+                                       h_min=humidity[0], h_max=humidity[1],
+                                       w_min=wind[0], w_max=wind[1], emoji=emoji))
     return emoji, description
 
 
@@ -248,8 +233,8 @@ def process_activity(args, activity_id, activities, force=False):
     if activity.get("trainer") or str(activity.get("sport_type", "")).startswith("Virtual"):
         print(f"⏭️ 活动 {activity_id} 为室内活动，跳过")
         return "indoor"
-    if not force and (has_weather(activity.get("description")) or has_weather_title(activity.get("name"))):
-        print(f"⏭️ 活动 {activity_id} 标题/描述已有天气标注，跳过")
+    if not force and has_weather(activity.get("description"), args.weather_template):
+        print(f"⏭️ 活动 {activity_id} 描述已有天气标注，跳过")
         return "existing"
     location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
     if location is None:
@@ -263,10 +248,11 @@ def process_activity(args, activity_id, activities, force=False):
         location = next((coordinates(point) for point in points if coordinates(point)), None)
     if location is None:
         raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
-    emoji, description = weather_annotation(activity, location)
+    emoji, description = weather_annotation(activity, location, args.weather_template)
     extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "", "WEATHER_DESC_FILE": "",
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
-             "STRAVA_SYNC_CHECK_WEATHER": "0" if force else "1"}
+             "STRAVA_SYNC_CHECK_WEATHER": "0" if force else "1",
+             "WEATHER_TEMPLATE_FILE": args.template}
     result = invoke("show" if args.dry_run else "run", activity_id, extra)
     if result.returncode not in (0, 2, 3):
         raise script_error(result, "Strava 写入失败，未记录成功")
@@ -349,10 +335,14 @@ def parse_args():
     parser.add_argument("--page-size", type=int, default=50, help="每页活动数，默认 50，范围 1–200")
     parser.add_argument("--force", action="store_true", help="重算查询范围内活动，室内活动仍跳过")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写活动、队列或扫描进度")
+    parser.add_argument("--template", default=os.environ.get("WEATHER_TEMPLATE_FILE") or "templates/weather.default.txt",
+                        help="天气描述模板，优先于 WEATHER_TEMPLATE_FILE；相对路径以仓库根目录为准")
     parser.add_argument("--latitude", type=float, help="指定单条活动的纬度")
     parser.add_argument("--longitude", type=float, help="指定单条活动的经度")
     args = parser.parse_args()
     args.dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
+    if not args.template.strip():
+        parser.error("--template 必须指定天气模板文件路径")
     if args.activity_id is not None and not re.fullmatch(r"[1-9][0-9]*", args.activity_id):
         parser.error("--activity-id 必须为正整数")
     if not 1 <= args.page_size <= 200:
@@ -383,6 +373,7 @@ def main():
     args = parse_args()
     os.umask(0o077)
     try:
+        args.weather_template = load_template(args.template)
         fd = private_open(ROOT / ".strava_weather_state.lock", os.O_RDWR | os.O_CREAT)
         with os.fdopen(fd, "w") as lock:
             try:

@@ -40,6 +40,10 @@ test_reorder_preserves_trailing_text() {
 
   mkdir -p "$work_dir"
   cp "$ROOT_DIR/reorder_summitbag.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
+  if [[ -f "$ROOT_DIR/weather_template.py" ]]; then
+    cp "$ROOT_DIR/weather_template.py" "$work_dir/"
+    cp -R "$ROOT_DIR/templates" "$work_dir/"
+  fi
   cat > "$work_dir/strava_config.sh" <<'EOF'
 CLIENT_ID="test-client-id"
 CLIENT_SECRET="test-client-secret"
@@ -49,6 +53,7 @@ EOF
 EOF
   cat > "$work_dir/sitecustomize.py" <<'PY'
 import json
+import os
 import urllib.request
 
 
@@ -67,14 +72,15 @@ def fake_urlopen(request):
     if "/athlete/activities" in url:
         return FakeResponse([{"id": 1, "sport_type": "TrailRun"}])
     if "/activities/1" in url:
+        weather = ("温度: 10°C - 12°C\n湿度: 60% - 70%\nPowered By www.gearaut.com\n")
+        if os.environ.get("REORDER_CUSTOM"):
+            weather = "我的天气 🌙\n气温 -2.0～5.0°C\n"
         return FakeResponse({
             "id": 1,
             "name": "测试活动",
             "description": (
                 "原备注\n"
-                "温度: 10°C - 12°C\n"
-                "湿度: 60% - 70%\n"
-                "Powered By www.gearaut.com\n"
+                + weather +
                 "活动后的重要备注\n"
                 "https://summitbag.com/example"
             ),
@@ -90,6 +96,18 @@ PY
 
   [[ "$occurrences" == "2" ]] || fail "reorder deleted unrelated text after the weather block"
   echo "PASS: reorder preserves trailing text"
+
+  cat > "$work_dir/custom.txt" <<'EOF'
+我的天气 {emoji}
+气温 {t_min:.1f}～{t_max:.1f}°C
+EOF
+  echo 'WEATHER_TEMPLATE_FILE="custom.txt"' >> "$work_dir/strava_config.sh"
+  output=$(cd "$work_dir" && PYTHONPATH="$work_dir" REORDER_CUSTOM=1 ./reorder_summitbag.sh)
+  [[ "$output" == *"共 1 条活动需要调整"* ]] || fail "reorder did not recognize custom weather"
+  occurrences=$(grep -o "活动后的重要备注" <<< "$output" | wc -l | tr -d ' ')
+  [[ "$occurrences" == "2" ]] || fail "custom reorder deleted trailing notes"
+  [[ "$output" == *$'https://summitbag.com/example\n    | 我的天气 🌙'* ]] || fail "summitbag was not moved before custom weather"
+  echo "PASS: reorder recognizes custom templates and preserves trailing text"
 }
 
 test_read_commands() {
@@ -252,10 +270,12 @@ case "${1:-all}" in
   read) test_read_commands ;;
   security) python3 "$ROOT_DIR/tests/security.py" ;;
   sync) python3 "$ROOT_DIR/tests/sync.py" ;;
+  templates) python3 "$ROOT_DIR/tests/templates.py" ;;
   all)
     test_auth_does_not_require_activity_id
     test_reorder_preserves_trailing_text
     test_read_commands
+    python3 "$ROOT_DIR/tests/templates.py"
     python3 "$ROOT_DIR/tests/security.py"
     python3 "$ROOT_DIR/tests/sync.py"
     ;;

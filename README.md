@@ -10,6 +10,7 @@
 - `sync` 分页发现新增活动并重试积压任务，按 ID 跳过已完成活动的详情和天气查询，省去 AI 分步编排
 - 标题：按 weather_code、当地时段和极值生成 emoji（🌞⛅☁️🌫️🌧️❄️⛈️🌙），体感 >30 加 🥵、<0 加 🥶，风速 >30 km/h 加 💨
 - 描述：活动时段内各字段的 min - max（升序），保留 2 位小数
+- 独立文本模板：自定义天气描述的字段、排版、精度和署名，默认输出保持原样
 - 数据源：Open-Meteo（无需密钥；近期活动用 15 分钟 `minutely_15`，历史活动用 archive hourly）
 - 覆盖前预览确认（`show` / `DRY_RUN=1`）
 - 附带 Claude Code skill，可由 AI 端到端驱动
@@ -22,6 +23,9 @@ update-strava-weather/
 ├── strava_common.sh               凭据权限和安全请求公共逻辑
 ├── strava_oauth.py                本地 OAuth 回调与 state 校验
 ├── strava_sync.py                 自动补齐天气、处理记录与并发锁
+├── weather_template.py            天气模板渲染、识别与替换
+├── templates/weather.default.txt  默认天气描述模板（提交）
+├── weather.custom.txt             可选个人模板（gitignore）
 ├── strava_config.example.sh        配置模板（提交）
 ├── strava_config.sh                真实密钥（gitignore）
 ├── .strava_tokens.json             令牌缓存（gitignore，自动生成）
@@ -67,7 +71,7 @@ update-strava-weather/
 # 按 UTC 日期补扫，包含起止当天；未结束的日期只查到本轮开始时刻
 ./update_strava_weather.sh sync --since 2026-10-01 --until 2026-10-15
 
-# 补扫全部历史，已有完整天气和已完成活动仍跳过
+# 补扫全部历史，已有天气标注和已完成活动仍跳过
 ./update_strava_weather.sh sync --all
 
 # 指定活动时不查列表；无 GPS 时可同时提供经纬度
@@ -76,7 +80,7 @@ update-strava-weather/
 
 `sync` 默认直接补齐缺失天气。首次扫描最近 7 天；之后从“上次完整扫描时间往前 7 天”查到本轮开始时刻，因此停用一段时间后也会覆盖整个停用期间。每页默认 50 条，可用 `--page-size 1–200` 调整；分页参数固定本轮时间上限，按 ID 去重，不会遇到已处理活动就提前停止。通常少量活动只需要一次列表请求，已完成的 ID 不再请求详情和天气。
 
-发现的待处理 ID 每页先落盘，完整扫描后才推进扫描进度，再逐条处理队列。成功更新、已有完整天气和室内活动均立即记录完成；普通单条失败保留队列并继续其它活动，即使失败活动已不在下次查询范围内也会重试。遇到授权失败或 429 时停止本轮，保留尚未处理的 ID。部分失败时命令返回非零退出码，并报告完成、失败和剩余数量。
+发现的待处理 ID 每页先落盘，完整扫描后才推进扫描进度，再逐条处理队列。成功更新、已有天气标注和室内活动均立即记录完成；普通单条失败保留队列并继续其它活动，即使失败活动已不在下次查询范围内也会重试。遇到授权失败或 429 时停止本轮，保留尚未处理的 ID。部分失败时命令返回非零退出码，并报告完成、失败和剩余数量。
 
 分页失败或首次扫描中断会保留原查询起点，不把未扫描范围当作完成；再次运行默认 `sync` 会覆盖原范围。空列表仍更新完整扫描时间。`--dry-run` 或 `DRY_RUN=1` 不写活动、队列、处理结果或扫描进度。
 
@@ -144,6 +148,7 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 - `STRAVA_PAGE` / `STRAVA_AFTER` / `STRAVA_BEFORE` — `list` 的页码、开始和结束 Unix 时间戳，后两者为 API 原始排除边界
 - `WEATHER_EMOJI` / `WEATHER_EMOJI_FILE` 追加到标题的 emoji
 - `WEATHER_DESC` / `WEATHER_DESC_FILE` 追加到描述的天气块
+- `WEATHER_TEMPLATE_FILE` 天气描述模板路径，用于 `sync` 生成及更新时识别旧天气块
 - `DRY_RUN=1` 仅预览
 - `YES=1` 跳过确认
 
@@ -163,11 +168,58 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 
 ## 天气块模板
 
-```
-温度: {t_min}°C - {t_max}°C  体感温度: {at_min}°C - {at_max}°C
-湿度: {h_min}% - {h_max}%  风速: {w_min} km/h - {w_max} km/h
+默认模板位于 `templates/weather.default.txt`，保持原有字段、两位小数、空格、换行和署名：
+
+```text
+温度: {t_min:.2f}°C - {t_max:.2f}°C  体感温度: {at_min:.2f}°C - {at_max:.2f}°C
+湿度: {h_min:.2f}% - {h_max:.2f}%  风速: {w_min:.2f} km/h - {w_max:.2f} km/h
 Not Powered By www.gearaut.com 🍚
 ```
+
+自定义时先复制，再编辑 `weather.custom.txt`（已 gitignore）：
+
+```bash
+cp templates/weather.default.txt weather.custom.txt
+```
+
+例如改成：
+
+```text
+{emoji} 本次运动天气
+🌡️ {t_min:.1f}～{t_max:.1f}°C，体感 {at_min:.1f}～{at_max:.1f}°C
+💧 {h_min:.0f}～{h_max:.0f}% ｜ 💨 {w_min:.1f}～{w_max:.1f} km/h
+Not Powered By www.gearaut.com 🍚
+```
+
+| 字段 | 含义与单位 |
+| --- | --- |
+| `{emoji}` | 现有规则计算的天气 emoji，标题规则保持原样 |
+| `{t_min}` / `{t_max}` | 最低／最高温度，°C |
+| `{at_min}` / `{at_max}` | 最低／最高体感温度，°C |
+| `{h_min}` / `{h_max}` | 最低／最高湿度，% |
+| `{w_min}` / `{w_max}` | 最低／最高风速，km/h |
+
+数值默认保留两位小数，可使用 `.0f` 至 `.6f` 指定精度；单位和文案由模板控制，删除某行即可隐藏相应字段。模板须为 UTF-8，包含固定文案以识别天气块。字面量花括号写成 `{{` 和 `}}`。不支持表达式、属性访问或条件语法；模板不存在、为空或字段错误时，`sync` 在请求 API 和写入处理记录之前报错。
+
+在 `strava_config.sh` 中配置后，手动运行、cron 和 webhook 都会使用该模板：
+
+```bash
+WEATHER_TEMPLATE_FILE="weather.custom.txt"
+```
+
+也可以临时选用并预览（`123` 替换为实际活动 ID）：
+
+```bash
+./update_strava_weather.sh sync --activity-id 123 --force --dry-run --template weather.custom.txt
+```
+
+优先级为 `--template` > 环境变量 `WEATHER_TEMPLATE_FILE` > 配置文件 > 默认模板。相对路径统一以仓库根目录为准。`WEATHER_DESC_FILE` 仍表示已经生成好的描述文本，不会解析其中的占位符。
+
+**防重复与更新规则：** 描述包含 `www.gearaut.com`，或完整匹配当前模板的固定文案、字段位置与换行，即视为已有天气。数值和天气 emoji 按类型匹配，不要求等于本次计算结果；同时兼容历史 gearaut / QWeather 天气块。只有标题 emoji 时仍会补齐描述。写入前会再次读取并检查最新描述。
+
+默认同步跳过已有天气及已处理 ID；更换模板后，可指定活动加 `--force` 更新。强制更新仅移除能定位的旧格式或当前模板天气块，保留前后备注及 summitbag。若含域名但无法定位旧天气块，会报错而不追加。`reorder_summitbag.sh` 使用同一模板配置识别天气块。
+
+建议个人模板保留 `www.gearaut.com` 署名，以便改版后仍能防重复。无署名的自定义模板只能按当前结构识别：修改固定文案或换行前，请保留旧模板，必要时手动清理旧天气块后再强制更新。
 
 ## AI Skill
 

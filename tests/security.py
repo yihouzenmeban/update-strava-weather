@@ -89,10 +89,12 @@ class ScriptSecurityTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="strava-security-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        for name in ("update_strava_weather.sh", "reorder_summitbag.sh", "strava_common.sh", "strava_oauth.py"):
+        for name in ("update_strava_weather.sh", "reorder_summitbag.sh", "strava_common.sh", "strava_oauth.py", "weather_template.py"):
             source = ROOT / name
             if source.exists():
                 shutil.copy2(source, self.directory)
+        if (ROOT / "templates").exists():
+            shutil.copytree(ROOT / "templates", self.directory / "templates")
         (self.directory / "strava_config.sh").write_text(
             f'CLIENT_ID="dummy-client-id"\nCLIENT_SECRET="{SECRET}"\n'
         )
@@ -111,7 +113,7 @@ class ScriptSecurityTests(unittest.TestCase):
         self.runtime.mkdir()
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "WEATHER_DESC", "WEATHER_DESC_FILE",
-                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "CLIENT_SECRET", "CLIENT_ID"):
+                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "CLIENT_SECRET", "CLIENT_ID"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
                                 PYTHONPATH=str(self.directory), TMPDIR=str(self.runtime))

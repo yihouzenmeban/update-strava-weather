@@ -18,8 +18,10 @@
 set +x
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WEATHER_TEMPLATE_FROM_ENV="${WEATHER_TEMPLATE_FILE:-}"
 # shellcheck source=strava_common.sh
 source "$SCRIPT_DIR/strava_common.sh"
+WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FROM_ENV:-${WEATHER_TEMPLATE_FILE:-}}"
 
 if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
   die "请先创建 strava_config.sh 并填好 CLIENT_ID"
@@ -69,8 +71,17 @@ DRY_RUN="${DRY_RUN:-}"
 APPLY=0
 [[ "$YES" == "1" && "$DRY_RUN" != "1" ]] && APPLY=1
 
-ACCESS="$ACCESS" APPLY="$APPLY" python3 - <<'PY'
+WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FILE:-}" ACCESS="$ACCESS" APPLY="$APPLY" python3 - "$SCRIPT_DIR" <<'PY'
 import json, os, sys, time, urllib.request, urllib.error
+
+sys.path.insert(0, sys.argv[1])
+from weather_template import load_template, weather_spans
+
+try:
+    template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
+except ValueError as error:
+    print(f"❌ {error}", file=sys.stderr)
+    sys.exit(1)
 
 ACCESS = os.environ["ACCESS"]
 APPLY = os.environ["APPLY"] == "1"
@@ -117,7 +128,6 @@ def req(method, url, data=None):
             time.sleep(10)
             continue
 
-WEATHER_MARK = "Powered By www.gearaut.com"
 SUMMIT_MARK = "summitbag.com"
 
 # 1) 分页拉全部活动，过滤 TrailRun
@@ -146,23 +156,17 @@ for i, a in enumerate(trails, 1):
     desc = detail.get("description") or ""
     if not desc:
         continue
-    wb_pos = desc.find(WEATHER_MARK)
+    spans = weather_spans(desc, template)
     sb_pos = desc.find(SUMMIT_MARK)
     # 需要同时有天气块和 summitbag，且 summitbag 在天气之后
-    if wb_pos == -1 or sb_pos == -1 or sb_pos < wb_pos:
+    if not spans or sb_pos == -1 or sb_pos < spans[0][1]:
         continue
 
     # 目标顺序：备注 → summitbag → 天气块，其它内容和空行保持原顺序
     lines = desc.split("\n")
-    wb_start = wb_end = None
-    for idx, l in enumerate(lines):
-        if wb_start is None and l.startswith("温度:"):
-            wb_start = idx
-        if "Powered By www.gearaut.com" in l:
-            wb_end = idx
-            break
+    wb_start = desc[:spans[0][0]].count("\n")
     summit_lines = [l for l in lines if SUMMIT_MARK in l]
-    if wb_start is None or wb_end is None or not summit_lines:
+    if not summit_lines:
         continue
     # summitbag 已确认位于天气块之后，移除后插到天气块起始位置即可
     other_lines = [l for l in lines if SUMMIT_MARK not in l]

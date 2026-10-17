@@ -10,6 +10,9 @@ strava_config.sh.*
 .env
 .env.*
 
+# 个人天气模板
+weather.custom.txt
+
 # Python 缓存和私有 Git 备份
 __pycache__/
 *.py[cod]

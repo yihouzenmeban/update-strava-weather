@@ -35,8 +35,10 @@
 set +x
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WEATHER_TEMPLATE_FROM_ENV="${WEATHER_TEMPLATE_FILE:-}"
 # shellcheck source=strava_common.sh
 source "$SCRIPT_DIR/strava_common.sh"
+export WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FROM_ENV:-${WEATHER_TEMPLATE_FILE:-}}"
 
 # 要追加的天气 emoji 和天气描述块（可被环境变量覆盖，或用 *_FILE 指定文件路径，文件优先）
 WEATHER_EMOJI="${WEATHER_EMOJI:-}"
@@ -204,6 +206,15 @@ do_update() (
     python3 - "$work_dir/activity.json" "$body_file" "$SCRIPT_DIR" <<'PY'
 import json, sys, os, re
 
+sys.path.insert(0, sys.argv[3])
+from weather_template import has_weather, load_template, strip_weather
+
+try:
+    template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
+except ValueError as error:
+    print(f"❌ {error}", file=sys.stderr)
+    sys.exit(1)
+
 act = json.load(open(sys.argv[1], encoding="utf-8"))
 if "id" not in act:
     print("❌ 拉取活动失败:", json.dumps(act, ensure_ascii=False)[:300]); sys.exit(1)
@@ -222,9 +233,7 @@ if (is_trainer or is_virtual) and os.environ.get("FORCE", "") != "1":
 name = act.get("name", "") or ""
 desc = act.get("description", "") or ""
 if os.environ.get("STRAVA_SYNC_CHECK_WEATHER") == "1":
-    sys.path.insert(0, sys.argv[3])
-    from strava_sync import has_weather
-    if has_weather(desc):
+    if has_weather(desc, template):
         print("⏭️ 活动已补上天气，保留最新内容，不重复写入")
         sys.exit(3)
 emoji = os.environ["WEATHER_EMOJI"].strip()
@@ -237,7 +246,11 @@ name_base = emoji_tail.sub('', name)
 new_name = (name_base + " " + emoji).strip() if emoji else name_base
 
 # 描述：去掉旧天气块（兼容历史署名），再追加新块
-desc_clean = re.sub(r'温度:.*?(?:Not Powered By www\.gearaut\.com [🍚👻]|Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\)))\s*', '', desc, flags=re.S).strip()
+try:
+    desc_clean = strip_weather(desc, template)
+except ValueError as error:
+    print(f"❌ {error}", file=sys.stderr)
+    sys.exit(1)
 if block:
     new_desc = (desc_clean + "\n" + block) if desc_clean else block
 else:

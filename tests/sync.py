@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 BLOCK = ("温度: 20.00°C - 22.00°C  体感温度: 30.00°C - 32.00°C\n"
          "湿度: 60.00% - 70.00%  风速: 3.00 km/h - 5.00 km/h\nPowered By www.gearaut.com")
 
@@ -102,9 +104,11 @@ class SyncTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="strava-sync-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        for name in ("update_strava_weather.sh", "strava_common.sh", "strava_sync.py"):
+        for name in ("update_strava_weather.sh", "strava_common.sh", "strava_sync.py", "weather_template.py"):
             if (ROOT / name).exists():
                 shutil.copy2(ROOT / name, self.directory)
+        if (ROOT / "templates").exists():
+            shutil.copytree(ROOT / "templates", self.directory / "templates")
         (self.directory / "strava_config.sh").write_text('CLIENT_ID="test-client-id"\nCLIENT_SECRET="test-client-secret"\n')
         (self.directory / ".strava_tokens.json").write_text(json.dumps({
             "access_token": "test-access-token", "refresh_token": "test-refresh-token", "expires_at": 4102444800,
@@ -118,7 +122,7 @@ class SyncTests(unittest.TestCase):
         (self.directory / "sitecustomize.py").write_text(WEATHER_MOCK)
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "FORCE", "WEATHER_DESC", "WEATHER_DESC_FILE",
-                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "CLIENT_ID", "CLIENT_SECRET"):
+                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "CLIENT_ID", "CLIENT_SECRET"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
                                 PYTHONPATH=str(self.directory), TMPDIR=str(self.runtime))
@@ -300,8 +304,76 @@ class SyncTests(unittest.TestCase):
         self.assertIn("login", result.stderr)
         self.assertEqual(self.requests(), [])
 
-    def test_partial_weather_block_is_completed(self):
+    def test_domain_signature_is_sufficient_to_skip_existing_weather(self):
         self.scenario["activity"] = dict(self.activity, description="温度: 20°C\nPowered By www.gearaut.com")
+        self.assert_success(self.sync())
+        self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
+
+    def test_custom_template_is_selected_from_config_or_environment_and_cli_takes_priority(self):
+        (self.directory / "custom.txt").write_text("我的天气 {emoji}\n气温 {t_min:.1f}～{t_max:.1f}°C\n风速 {w_max:.0f} km/h\n")
+        config = self.directory / "strava_config.sh"
+        original = config.read_text()
+        for source in ("config", "environment", "cli"):
+            with self.subTest(source=source):
+                self.state.unlink(missing_ok=True)
+                self.clear_requests()
+                configured = "custom.txt" if source == "config" else "missing.txt"
+                config.write_text(original + f'WEATHER_TEMPLATE_FILE="{configured}"\n')
+                arguments = ("--template", "custom.txt") if source == "cli" else ()
+                environment = {"WEATHER_TEMPLATE_FILE": "missing.txt" if source == "cli" else "custom.txt"} if source != "config" else {}
+                self.assert_success(self.sync("--activity-id", "123", *arguments, **environment))
+                self.assertEqual(self.requests()[-1]["body"]["description"],
+                                 "原备注\nhttps://summitbag.com/example\n我的天气 🌧️🥵\n气温 22.0～26.0°C\n风速 9 km/h")
+
+    def test_custom_weather_is_detected_from_template_even_with_different_values(self):
+        (self.directory / "custom.txt").write_text("气温 {t_min:.1f}～{t_max:.1f}°C")
+        self.scenario["activity"] = dict(self.activity, description="原备注\n气温 -2.0～5.0°C\n后记")
+        self.assert_success(self.sync("--template", "custom.txt"))
+        self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
+
+    def test_force_replaces_custom_weather_and_preserves_surrounding_notes(self):
+        (self.directory / "custom.txt").write_text("我的天气 {emoji}\n气温 {t_min:.1f}～{t_max:.1f}°C")
+        self.scenario["fresh"] = dict(self.activity, description="原备注\n我的天气 🌙\n气温 -2.0～5.0°C\n后记\nhttps://summitbag.com/example")
+        self.assert_success(self.sync("--template", "custom.txt", "--force"))
+        self.assertEqual(self.requests()[-1]["body"]["description"],
+                         "原备注\n后记\nhttps://summitbag.com/example\n我的天气 🌧️🥵\n气温 22.0～26.0°C")
+
+    def test_fresh_custom_weather_added_during_calculation_prevents_a_write(self):
+        (self.directory / "custom.txt").write_text("气温 {t_min:.1f}～{t_max:.1f}°C")
+        self.scenario["fresh"] = dict(self.activity, description="新备注\n气温 -2.0～5.0°C")
+        self.assert_success(self.sync("--template", "custom.txt"))
+        self.assertTrue(any(entry["kind"] == "weather" for entry in self.requests()))
+        self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
+
+    def test_template_errors_fail_before_requests_or_state_changes(self):
+        for source in (None, "气温 {unknown}", "气温 {t_min:{t_max}}", ""):
+            with self.subTest(source=source):
+                path = self.directory / "bad.txt"
+                if source is not None:
+                    path.write_text(source)
+                result = self.sync("--template", "bad.txt")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("模板", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(self.requests(), [])
+                self.assertFalse(self.state.exists())
+
+    def test_force_does_not_append_to_an_unlocatable_domain_block(self):
+        self.scenario["fresh"] = dict(self.activity, description="原备注\n旧布局 www.gearaut.com\n后记")
+        result = self.sync("--force")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("无法定位", result.stderr)
+        self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
+
+    def test_empty_template_argument_fails_before_requests_or_state_changes(self):
+        result = self.sync("--template", "")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("模板", result.stderr)
+        self.assertEqual(self.requests(), [])
+        self.assertFalse(self.state.exists())
+
+    def test_title_emoji_alone_does_not_prevent_description_from_being_added(self):
+        self.scenario["activity"] = dict(self.activity, name="晨跑 🌞")
         self.assert_success(self.sync())
         self.assertEqual(self.requests()[-1]["method"], "PUT")
 
