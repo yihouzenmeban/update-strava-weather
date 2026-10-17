@@ -6,7 +6,10 @@ Listens on 127.0.0.1 only (ngrok is the sole ingress). Handles:
   POST /strava-webhook  -> activity events; on activity/create spawns a detached
                            `update_strava_weather.sh sync --activity-id <id>`
                            after a configurable delay (60s by default; lets Strava finish processing
-                           the activity's GPS data and final title)
+                           the activity's GPS data and final title),
+                           then runs any hooks from receiver_config.json
+                           (personal extensions that live outside this repo,
+                           e.g. kicking off a Garmin->COROS sync)
   GET  /health          -> liveness probe for the watchdog
 
 Strava requires a 200 response within ~2s, so event handling never blocks
@@ -108,6 +111,53 @@ def trigger_sync(activity_id):
         log_out.close()
 
 
+def trigger_hooks(activity_id):
+    """Run configured post-create hooks detached; never blocks the HTTP response.
+
+    Hooks are personal extensions that live outside this repo (e.g. kicking
+    off a Garmin->COROS sync when a new Strava activity appears). Configure
+    them in receiver_config.json (gitignored, per-machine):
+        "hooks": [
+          {"name": "garmin-coros",
+           "command": ["/path/to/run_sync.sh", "--account", "account_a", "--headless-only"],
+           "cwd": "/path/to/workdir"}
+        ]
+    `command` must be a list (no shell involved). `cwd` is optional.
+    Each hook's output goes to logs/hook-<name>-<activity_id>.log.
+    """
+    hooks = CONFIG.get("hooks") or []
+    if not isinstance(hooks, list):
+        log.error("invalid hooks config (must be a list); ignoring")
+        return
+    for hook in hooks:
+        if not isinstance(hook, dict):
+            log.warning("ignoring malformed hook entry: %r", hook)
+            continue
+        name = str(hook.get("name") or "unnamed")
+        command = hook.get("command")
+        cwd = hook.get("cwd")
+        if (not isinstance(command, list) or not command
+                or not all(isinstance(a, str) for a in command)):
+            log.warning("ignoring hook %r: command must be a non-empty list of strings", name)
+            continue
+        safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:40]
+        log.info("triggering hook %r for activity %s", name, activity_id)
+        log_out = open(ROOT / "logs" / f"hook-{safe_name}-{activity_id}.log", "a", encoding="utf-8")
+        try:
+            subprocess.Popen(
+                command,
+                stdout=log_out,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                cwd=str(cwd) if cwd else None,
+            )
+        except Exception:
+            log.exception("failed to spawn hook %r for activity %s", name, activity_id)
+        finally:
+            log_out.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "StravaWebhook/1.0"
 
@@ -155,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
         log.info("event: object_type=%s aspect_type=%s object_id=%s", object_type, aspect_type, object_id)
         if object_type == "activity" and aspect_type == "create" and object_id:
             trigger_sync(object_id)
+            trigger_hooks(object_id)
         # Always 200 fast: Strava retries otherwise; the 2h cron is the fallback.
         return self._send_json(200, {"ok": True})
 

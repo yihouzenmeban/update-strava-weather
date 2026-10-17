@@ -66,6 +66,28 @@ sudo systemctl restart strava-webhook-receiver.service
 延迟用于降低其它工具尚未完成描述修改的概率；它不提供跨工具的原子更新保证。
 同步只使用延迟结束后的一次详情读取，失败重试时再重新读取，不固定追加第二次 GET。
 
+## 个人 Hooks（可选）
+
+`activity/create` 事件除了触发天气同步，还会运行 `webhook/receiver_config.json`
+里配置的个人 hooks——这些是你自己机器上的扩展，不属于本仓库：
+
+```json
+{
+  "verify_token": "...",
+  "sync_delay_seconds": 60,
+  "hooks": [
+    {"name": "garmin-coros",
+     "command": ["/home/hatch/tools/garmin-sync/run_sync.sh", "--account", "account_a", "--headless-only"],
+     "cwd": "/home/hatch/tools/garmin-sync"}
+  ]
+}
+```
+
+- `command` 必须是字符串数组（不经过 shell）；`cwd` 可选。
+- 每个 hook 以 detached 子进程运行，不阻塞 200 响应；输出记到
+  `webhook/logs/hook-<name>-<activity_id>.log`。
+- 配置文件是 gitignored 的，按机器存放，仓库保持干净。
+
 ## 本地模拟验证
 
 在仓库根目录运行：
