@@ -7,7 +7,7 @@ Listens on 127.0.0.1 only (ngrok is the sole ingress). Handles:
                            `update_strava_weather.sh sync --activity-id <id>`
                            after a configurable delay (60s by default; lets Strava finish processing
                            the activity's GPS data and final title),
-                           then runs any hooks from receiver_config.json
+                           and immediately runs hooks from config.local.json
                            (personal extensions that live outside this repo,
                            e.g. kicking off a Garmin->COROS sync)
   GET  /health          -> liveness probe for the watchdog
@@ -29,7 +29,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CONFIG_FILE = ROOT / "receiver_config.json"
 # Absolute path anchored at this file: the service runs as root (whose $HOME
 # is /root), so Path.home() must NOT be used here.
 # Supports two layouts: webhook/ inside the repo checkout, or webhook/ as a
@@ -38,9 +37,11 @@ SYNC_SCRIPT = ROOT.parent / "update_strava_weather.sh"
 if not SYNC_SCRIPT.exists():
     SYNC_SCRIPT = ROOT.parent / "update-strava-weather" / "update_strava_weather.sh"
 LOG_FILE = ROOT / "logs" / "receiver.log"
-LISTEN_HOST = "127.0.0.1"
-LISTEN_PORT = 8787
-WEBHOOK_PATH = "/strava-webhook"
+sys.path.insert(0, str(SYNC_SCRIPT.parent))
+from project_config import ensure_verify_token, load_config as load_project_config
+
+CONFIG_FILE = SYNC_SCRIPT.parent / "config.local.json"
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,33 +52,20 @@ log = logging.getLogger("receiver")
 
 
 def load_config():
-    if CONFIG_FILE.exists():
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    config = {"verify_token": secrets.token_urlsafe(32), "sync_delay_seconds": 60}
-    fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-    os.chmod(CONFIG_FILE, 0o600)
-    log.info("generated new verify_token")
+    config = load_project_config(SYNC_SCRIPT.parent)["webhook"]
+    if not config["verify_token"]:
+        config["verify_token"] = ensure_verify_token(SYNC_SCRIPT.parent)
     return config
 
 
 CONFIG = load_config()
+LISTEN_HOST = CONFIG["listen_host"]
+LISTEN_PORT = CONFIG["listen_port"]
+WEBHOOK_PATH = CONFIG["path"]
 
 
 def sync_delay_seconds():
-    if "WEBHOOK_SYNC_DELAY_SECONDS" in os.environ:
-        setting, value = "WEBHOOK_SYNC_DELAY_SECONDS", os.environ["WEBHOOK_SYNC_DELAY_SECONDS"]
-    else:
-        setting, value = "sync_delay_seconds", CONFIG.get("sync_delay_seconds", 60)
-    if type(value) is int and value >= 0:
-        return value
-    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
-        try:
-            return int(value)
-        except ValueError:
-            pass
-    raise ValueError(f"{setting} 必须为非负整数（秒）")
+    return load_project_config(SYNC_SCRIPT.parent)["webhook"]["sync_delay_seconds"]
 
 
 SYNC_DELAY_SECONDS = sync_delay_seconds()
@@ -116,7 +104,7 @@ def trigger_hooks(activity_id):
 
     Hooks are personal extensions that live outside this repo (e.g. kicking
     off a Garmin->COROS sync when a new Strava activity appears). Configure
-    them in receiver_config.json (gitignored, per-machine):
+    them in config.local.json under webhook.hooks (gitignored, per-machine):
         "hooks": [
           {"name": "garmin-coros",
            "command": ["/path/to/run_sync.sh", "--account", "account_a", "--headless-only"],

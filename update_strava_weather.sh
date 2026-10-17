@@ -11,7 +11,7 @@
 #   批量补齐新增和待重试活动的天气：./update_strava_weather.sh sync
 #   预览：./update_strava_weather.sh sync --dry-run；重算：sync --force
 #   历史补扫：sync --since YYYY-MM-DD --until YYYY-MM-DD；全部历史：sync --all
-#   1) 首次：复制 strava_config.example.sh 为 strava_config.sh，填好 CLIENT_ID / CLIENT_SECRET；
+#   1) 首次：在 config.local.json 的 strava 中填写 client_id / client_secret；
 #      确认 Strava 应用 Authorization Callback Domain = localhost；然后运行：
 #        ./update_strava_weather.sh login
 #   2) 预览将要追加的标题/描述（不改 Strava）：
@@ -36,12 +36,8 @@
 set +x
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WEATHER_TEMPLATE_FROM_ENV="${WEATHER_TEMPLATE_FILE:-}"
-REORDER_SUMMITBAG_FROM_ENV="${REORDER_SUMMITBAG:-}"
 # shellcheck source=strava_common.sh
 source "$SCRIPT_DIR/strava_common.sh"
-export WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FROM_ENV:-${WEATHER_TEMPLATE_FILE:-}}"
-export REORDER_SUMMITBAG="${REORDER_SUMMITBAG_FROM_ENV:-${REORDER_SUMMITBAG:-1}}"
 
 # 要追加的天气 emoji 和天气描述块（可被环境变量覆盖，或用 *_FILE 指定文件路径，文件优先）
 WEATHER_EMOJI="${WEATHER_EMOJI:-}"
@@ -51,10 +47,10 @@ WEATHER_DESC="${WEATHER_DESC:-}"
 
 check_config() {
   if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
-    die "请先创建 strava_config.sh（参考 strava_config.example.sh）并填好 CLIENT_ID"
+    die "请在 config.local.json 的 strava.client_id 中填好 CLIENT_ID"
   fi
   if [[ -z "${CLIENT_SECRET:-}" || "$CLIENT_SECRET" == *"在这里粘贴"* ]]; then
-    die "请先创建 strava_config.sh（参考 strava_config.example.sh）并填好 CLIENT_SECRET"
+    die "请在 config.local.json 的 strava.client_secret 中填好 CLIENT_SECRET"
   fi
   return 0
 }
@@ -106,7 +102,7 @@ ensure_token() {
   fi
 
   now=$(date +%s)
-  if (( now < expires - 60 )); then
+  if (( now < expires - TOKEN_REFRESH_MARGIN_SECONDS )); then
     echo "→ 令牌仍有效，跳过刷新"
     return 0
   fi
@@ -141,7 +137,7 @@ do_read() (
   local endpoint
   case "$1" in
     list)
-      local count="${2:-1}"
+      local count="${2:-$STRAVA_LIST_COUNT}"
       [[ "$count" =~ ^[1-9][0-9]{0,2}$ ]] && (( count <= 200 )) || die "活动数量必须为 1–200 的整数"
       local page="${STRAVA_PAGE:-1}"
       [[ "$page" =~ ^[1-9][0-9]{0,8}$ ]] || die "STRAVA_PAGE 必须为正整数"

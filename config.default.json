@@ -1,0 +1,52 @@
+{
+  "strava": {
+    "client_id": "",
+    "client_secret": "",
+    "oauth_timeout_seconds": 300,
+    "list_count": 1,
+    "token_refresh_margin_seconds": 60
+  },
+  "weather": {
+    "template": "温度: {t_min:.2f}°C - {t_max:.2f}°C  体感温度: {at_min:.2f}°C - {at_max:.2f}°C\n湿度: {h_min:.2f}% - {h_max:.2f}%  风速: {w_min:.2f} km/h - {w_max:.2f} km/h\nNot Powered By www.gearaut.com 🍚",
+    "template_file": "",
+    "reorder_summitbag": true
+  },
+  "sync": {
+    "page_size": 50,
+    "lookback_days": 7
+  },
+  "webhook": {
+    "verify_token": "",
+    "sync_delay_seconds": 60,
+    "listen_host": "127.0.0.1",
+    "listen_port": 8787,
+    "path": "/strava-webhook",
+    "hooks": []
+  },
+  "ngrok": {
+    "domain": "",
+    "executable": "/home/hatch/bin/ngrok",
+    "config_file": "/home/hatch/.config/ngrok/ngrok.yml"
+  },
+  "http": {
+    "connect_timeout_seconds": 10,
+    "request_timeout_seconds": 60,
+    "weather_timeout_seconds": 30
+  },
+  "backfill": {
+    "max_rounds": 200,
+    "lock_retry_seconds": 600,
+    "rate_retry_seconds": 1200,
+    "fast_failure_seconds": 300,
+    "fast_failure_limit": 3,
+    "midnight_grace_seconds": 900
+  },
+  "reorder": {
+    "page_size": 200,
+    "rate_limit_floor": 5,
+    "rate_retry_seconds": 60,
+    "error_retry_seconds": 10,
+    "request_interval_milliseconds": 300,
+    "write_interval_milliseconds": 500
+  }
+}

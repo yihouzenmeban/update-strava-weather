@@ -3,7 +3,7 @@
 ## 项目结构与模块职责
 
 - `update_strava_weather.sh` 是命令入口，`strava_common.sh` 负责凭据与 HTTP 请求；`strava_oauth.py` 处理授权，`strava_sync.py` 负责活动发现、重试、并发锁和天气计算。
-- `weather_template.py` 处理描述渲染与山峰排序，默认模板位于 `templates/weather.default.txt`；`backfill_all.sh`、`reorder_summitbag.sh` 提供维护命令。
+- `weather_template.py` 处理描述渲染与山峰排序；`project_config.py` 统一加载 `config.default.json` 与私有的 `config.local.json`，默认模板正文也在默认配置中。`backfill_all.sh`、`reorder_summitbag.sh` 提供维护命令。
 - `webhook/` 包含接收器、部署脚本和 systemd 模板；`tests/` 存放隔离回归测试。个人集成通过各机器的 webhook hooks 配置接入。
 
 ## Agent 入口与技能维护
@@ -16,6 +16,7 @@
 | --- | --- | --- |
 | 实际同步 Strava 活动 | `.agents/skills/strava-weather-update/SKILL.md` | 按用户意图执行并核对脚本结果 |
 | 修改同步与重试 | `strava_sync.py`；`README.md` 的用法 | `python3 tests/sync.py` |
+| 修改共享配置 | `project_config.py`、`config.default.json`；`README.md` 的配置 | `python3 tests/config.py` |
 | 修改模板与山峰排序 | `weather_template.py`；`README.md` 的模板与排序说明 | `python3 tests/templates.py` |
 | 修改 webhook | `webhook/README.md`；`webhook/receiver.py` | `python3 tests/webhook.py` |
 | 修改授权与凭据处理 | `strava_oauth.py`、`strava_common.sh`、`update_strava_weather.sh` | `python3 tests/security.py`、`bash tests/regression.sh auth` |
@@ -28,6 +29,7 @@
 
 ```bash
 bash tests/regression.sh                 # 完整离线回归
+python3 tests/config.py                  # 默认回退、覆盖、迁移与权限
 python3 tests/sync.py                    # 同步流程测试
 python3 tests/webhook.py                 # 本机 HTTP webhook 集成测试
 python3 tests/templates.py               # 模板渲染与描述排序
@@ -56,3 +58,5 @@ PR 说明应描述行为、配置影响、相关问题及验证命令和结果�
 ## 安全与配置
 
 不提交凭据、令牌、处理记录、日志或个人 hooks 配置。敏感文件权限保持 `600`，临时目录保持 `700`。使用配置示例，机器专属集成保留在本地配置中，不写入共享应用代码。
+
+新增可配置默认值写入 `config.default.json`，各入口通过共享加载器读取；个人覆盖只写 `config.local.json`，不增加新的本机配置入口。

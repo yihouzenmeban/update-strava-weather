@@ -1,6 +1,0 @@
-# 复制本文件为 webhook/config.sh（gitignore，不提交），填入你自己的 ngrok 保留域名
-#
-# 获取方式：登录 https://dashboard.ngrok.com → Domains → New Domain，
-# 保留一个免费域名（形如 xxx.ngrok-free.dev），把完整域名填在下面。
-
-NGROK_DOMAIN="你的域名.ngrok-free.dev"

@@ -12,18 +12,14 @@
 #   YES=1 ./reorder_summitbag.sh     预览后直接写入
 #   DRY_RUN=1 ./reorder_summitbag.sh 等同默认预览
 #
-# 依赖同目录 strava_config.sh（CLIENT_ID/CLIENT_SECRET）和 .strava_tokens.json
+# 依赖同目录 config.local.json（strava 应用密钥）和 .strava_tokens.json
 # （由 update_strava_weather.sh login 生成）。
 
 set +x
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WEATHER_TEMPLATE_FROM_ENV="${WEATHER_TEMPLATE_FILE:-}"
-REORDER_SUMMITBAG_FROM_ENV="${REORDER_SUMMITBAG:-}"
 # shellcheck source=strava_common.sh
 source "$SCRIPT_DIR/strava_common.sh"
-WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FROM_ENV:-${WEATHER_TEMPLATE_FILE:-}}"
-REORDER_SUMMITBAG="${REORDER_SUMMITBAG_FROM_ENV:-${REORDER_SUMMITBAG:-1}}"
 [[ "$REORDER_SUMMITBAG" == "0" || "$REORDER_SUMMITBAG" == "1" ]] || die "REORDER_SUMMITBAG 必须为 0 或 1"
 if [[ "$REORDER_SUMMITBAG" == "0" ]]; then
   echo "⏭️ 山峰排序已关闭（REORDER_SUMMITBAG=0）"
@@ -31,10 +27,10 @@ if [[ "$REORDER_SUMMITBAG" == "0" ]]; then
 fi
 
 if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
-  die "请先创建 strava_config.sh 并填好 CLIENT_ID"
+  die "请在 config.local.json 的 strava.client_id 中填好 CLIENT_ID"
 fi
 if [[ -z "${CLIENT_SECRET:-}" || "$CLIENT_SECRET" == *"在这里粘贴"* ]]; then
-  die "请先创建 strava_config.sh 并填好 CLIENT_SECRET"
+  die "请在 config.local.json 的 strava.client_secret 中填好 CLIENT_SECRET"
 fi
 [[ -f "$TOKEN_FILE" ]] || die "没有令牌缓存 $TOKEN_FILE，请先跑 ./update_strava_weather.sh login 授权"
 
@@ -47,7 +43,7 @@ ensure_token() {
   [[ -n "$access" && -n "$refresh" ]] || die "令牌缓存不完整，请跑 ./update_strava_weather.sh login 重新授权"
 
   now=$(date +%s)
-  if (( now < expires - 60 )); then
+  if (( now < expires - TOKEN_REFRESH_MARGIN_SECONDS )); then
     echo "→ 令牌仍有效，跳过刷新"
     return 0
   fi
@@ -83,6 +79,10 @@ import json, os, sys, time, urllib.request, urllib.error
 
 sys.path.insert(0, sys.argv[1])
 from weather_template import load_template, reorder_summitbag
+from project_config import load_config
+
+config = load_config()
+settings = config["reorder"]
 
 try:
     template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
@@ -103,7 +103,7 @@ def req(method, url, data=None):
             r.add_header("Content-Type", "application/json; charset=utf-8")
             r.data = data.encode("utf-8")
         try:
-            resp = urllib.request.urlopen(r)
+            resp = urllib.request.urlopen(r, timeout=config["http"]["request_timeout_seconds"])
             body = resp.read().decode("utf-8")
             rem = resp.headers.get("X-RateLimit-Remaining", "")
             lim = resp.headers.get("X-RateLimit-Limit", "")
@@ -112,27 +112,27 @@ def req(method, url, data=None):
                 rem15 = int(rem.split(",")[0])
             except Exception:
                 rem15 = 999
-            if rem15 < 5:
-                print(f"  ⏳ 限流剩余 {rem15}，等待 60s...", flush=True)
-                time.sleep(60)
+            if rem15 < settings["rate_limit_floor"]:
+                print(f"  ⏳ 限流剩余 {rem15}，等待 {settings['rate_retry_seconds']}s...", flush=True)
+                time.sleep(settings["rate_retry_seconds"])
                 continue
             return json.loads(body) if body else {}, rem, lim
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                print("  ⏳ 触发限流 429，等待 60s...", flush=True)
-                time.sleep(60)
+                print(f"  ⏳ 触发限流 429，等待 {settings['rate_retry_seconds']}s...", flush=True)
+                time.sleep(settings["rate_retry_seconds"])
                 continue
             if e.code in (502, 503, 504):
-                print(f"  ⏳ HTTP {e.code}，10s 后重试...", flush=True)
-                time.sleep(10)
+                print(f"  ⏳ HTTP {e.code}，{settings['error_retry_seconds']}s 后重试...", flush=True)
+                time.sleep(settings["error_retry_seconds"])
                 continue
             err = e.read().decode("utf-8", "replace")
             print(f"  ❌ HTTP {e.code}: {err[:200]}", flush=True)
             return None, "", ""
         except urllib.error.URLError as e:
             # 瞬时网络/SSL 错误，退避重试
-            print(f"  ⏳ 网络错误 {e}，10s 后重试...", flush=True)
-            time.sleep(10)
+            print(f"  ⏳ 网络错误 {e}，{settings['error_retry_seconds']}s 后重试...", flush=True)
+            time.sleep(settings["error_retry_seconds"])
             continue
 
 # 1) 分页拉全部活动，过滤 TrailRun
@@ -140,14 +140,14 @@ print("→ 拉取活动列表...", flush=True)
 trails = []
 page = 1
 while True:
-    batch, _, _ = req("GET", f"https://www.strava.com/api/v3/athlete/activities?per_page=200&page={page}")
+    batch, _, _ = req("GET", f"https://www.strava.com/api/v3/athlete/activities?per_page={settings['page_size']}&page={page}")
     if not batch:
         break
     trails.extend(a for a in batch if a.get("sport_type") == "TrailRun")
-    if len(batch) < 200:
+    if len(batch) < settings["page_size"]:
         break
     page += 1
-    time.sleep(0.3)
+    time.sleep(settings["request_interval_milliseconds"] / 1000)
 print(f"→ 共 {len(trails)} 条越野跑活动，逐条拉取描述...", flush=True)
 
 # 2) 逐条拉详情，检测并计算新描述
@@ -155,7 +155,7 @@ changes = []  # [{id, name, before, after}]
 for i, a in enumerate(trails, 1):
     aid = a["id"]
     detail, _, _ = req("GET", f"https://www.strava.com/api/v3/activities/{aid}")
-    time.sleep(0.3)
+    time.sleep(settings["request_interval_milliseconds"] / 1000)
     if not detail:
         continue
     desc = detail.get("description") or ""
@@ -199,6 +199,6 @@ for c in changes:
         print(f"  ✅ {c['id']} {c['name']}", flush=True)
     else:
         print(f"  ❌ {c['id']} {c['name']} 失败", flush=True)
-    time.sleep(0.5)
+    time.sleep(settings["write_interval_milliseconds"] / 1000)
 print(f"\n完成：{ok}/{len(changes)} 条已更新")
 PY

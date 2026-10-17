@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 __HOOK_DIR__/receiver.py
+ExecStart=/usr/bin/python3 "__HOOK_DIR__/receiver.py"
 Restart=always
 RestartSec=5
 StandardOutput=append:__HOOK_DIR__/logs/receiver.log

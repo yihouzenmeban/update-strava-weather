@@ -1,13 +1,13 @@
 #!/bin/bash
 # 全量历史补扫驱动器：反复跑 ./update_strava_weather.sh sync --all。
-# 退避策略（Strava 限流 400/15分钟、4000/天）：
-# - 429：睡 20 分钟（15 分钟窗口已恢复）后重试；
-# - 连续 3 次"启动 5 分钟内就 429"：判定触及每日上限，休眠到 UTC 午夜 +15 分钟；
-# - 授权失效：停下报错；撞锁（另有 sync 在跑）：睡 10 分钟。
+# 轮数和退避时间读取共享配置的 backfill 段；授权失效时停止。
 # 状态全部落在 .strava_weather_state.json，断点续传。
 cd "$(dirname "$0")" || exit 1
+set +x
+SCRIPT_DIR="$PWD"
+source "$SCRIPT_DIR/strava_common.sh"
 LOG=backfill-all.log
-MAX_ROUNDS=200
+MAX_ROUNDS="$BACKFILL_MAX_ROUNDS"
 round=0
 fast429=0
 while [ "$round" -lt "$MAX_ROUNDS" ]; do
@@ -19,8 +19,8 @@ while [ "$round" -lt "$MAX_ROUNDS" ]; do
   elapsed=$(( $(date +%s) - start_ts ))
   echo "===== [$(date '+%F %T')] 第 $round 轮退出码 $code（用时 ${elapsed}s） =====" >> "$LOG"
   if tail -30 "$LOG" | grep -q "已有 sync 正在运行"; then
-    echo "撞锁，睡 10 分钟后重试" >> "$LOG"
-    sleep 600
+    echo "撞锁，等待 ${BACKFILL_LOCK_RETRY_SECONDS}s 后重试" >> "$LOG"
+    sleep "$BACKFILL_LOCK_RETRY_SECONDS"
     continue
   fi
   if [ "$code" -eq 0 ]; then
@@ -38,20 +38,20 @@ while [ "$round" -lt "$MAX_ROUNDS" ]; do
     echo "授权失效，停止重试，请手动 login" >> "$LOG"
     break
   fi
-  if [ "$elapsed" -lt 300 ]; then
+  if [ "$elapsed" -lt "$BACKFILL_FAST_FAILURE_SECONDS" ]; then
     fast429=$((fast429 + 1))
   else
     fast429=0
   fi
-  if [ "$fast429" -ge 3 ]; then
+  if [ "$fast429" -ge "$BACKFILL_FAST_FAILURE_LIMIT" ]; then
     now_utc=$(date -u +%s)
-    sleep_for=$(( (now_utc / 86400 + 1) * 86400 - now_utc + 900 ))
-    echo "连续 3 次快速 429，疑似触及每日上限，休眠 ${sleep_for}s 到 UTC 午夜后继续" >> "$LOG"
+    sleep_for=$(( (now_utc / 86400 + 1) * 86400 - now_utc + BACKFILL_MIDNIGHT_GRACE_SECONDS ))
+    echo "连续 ${BACKFILL_FAST_FAILURE_LIMIT} 次快速失败，疑似触及每日上限，休眠 ${sleep_for}s 到 UTC 午夜后继续" >> "$LOG"
     sleep "$sleep_for"
     fast429=0
   else
-    echo "等待 20 分钟后重试（15 分钟窗口退避）..." >> "$LOG"
-    sleep 1200
+    echo "等待 ${BACKFILL_RATE_RETRY_SECONDS}s 后重试..." >> "$LOG"
+    sleep "$BACKFILL_RATE_RETRY_SECONDS"
   fi
 done
 echo "===== [$(date '+%F %T')] 驱动器退出 =====" >> "$LOG"

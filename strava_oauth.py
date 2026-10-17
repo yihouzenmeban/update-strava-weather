@@ -5,11 +5,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import secrets
 import sys
 import time
+from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 import webbrowser
 
+from project_config import load_config
 
-def authorize(client_id: str, timeout: float = 300, opener=webbrowser.open) -> str:
+
+def authorize(client_id: str, timeout: Optional[float] = None, opener=webbrowser.open) -> str:
+    if timeout is None:
+        timeout = load_config()["strava"]["oauth_timeout_seconds"]
     state = secrets.token_urlsafe(32)
     result = {}
 
@@ -70,6 +75,6 @@ def authorize(client_id: str, timeout: float = 300, opener=webbrowser.open) -> s
 if __name__ == "__main__":
     try:
         print(authorize(sys.argv[1]))
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         print(f"❌ {error}", file=sys.stderr)
         sys.exit(1)

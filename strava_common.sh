@@ -6,10 +6,14 @@ umask 077
 
 die() { echo "❌ $*" >&2; exit 1; }
 
-CONFIG_FILE="$SCRIPT_DIR/strava_config.sh"
+CONFIG_FILE="$SCRIPT_DIR/config.local.json"
 TOKEN_FILE="$SCRIPT_DIR/.strava_tokens.json"
 
-python3 - "$CONFIG_FILE" "$TOKEN_FILE" <<'PY' || exit 1
+config_exports=$(python3 "$SCRIPT_DIR/project_config.py" shell) || exit 1
+eval "$config_exports"
+unset config_exports
+
+python3 - "$TOKEN_FILE" <<'PY' || exit 1
 import os, stat, sys
 
 for path in sys.argv[1:]:
@@ -28,11 +32,6 @@ for path in sys.argv[1:]:
         print("❌ 凭据必须为当前用户拥有的普通文件，不能使用符号链接或硬链接", file=sys.stderr)
         sys.exit(1)
 PY
-
-if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck source=strava_config.example.sh
-  source "$CONFIG_FILE"
-fi
 
 token_field() {
   python3 - "$TOKEN_FILE" "$1" <<'PY'
@@ -75,7 +74,7 @@ client_id, secret, grant, value, _ = sys.stdin.read().split("\0")
 field = "code" if grant == "authorization_code" else "refresh_token"
 sys.stdout.write(urlencode({"client_id": client_id, "client_secret": secret,
                             "grant_type": grant, field: value}))
-' | curl -q -sS --connect-timeout 10 --max-time 60 -X POST \
+' | curl -q -sS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECONDS" --max-time "$HTTP_REQUEST_TIMEOUT_SECONDS" -X POST \
     "https://www.strava.com/api/v3/oauth/token" --data-binary @-
 }
 
@@ -83,7 +82,7 @@ strava_curl() {
   local access="$1"
   shift
   printf 'Authorization: Bearer %s\n' "$access" |
-    curl -q -sS --connect-timeout 10 --max-time 60 --header @- "$@"
+    curl -q -sS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECONDS" --max-time "$HTTP_REQUEST_TIMEOUT_SECONDS" --header @- "$@"
 }
 
 check_api_status() {

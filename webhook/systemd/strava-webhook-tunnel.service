@@ -11,13 +11,12 @@ User=root
 # connection. Direct egress needs the "other TCP connections" toggle enabled
 # in the Muse App (Direct network protocol settings).
 UnsetEnvironment=HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
-ExecStart=/home/hatch/bin/ngrok http --url=https://__NGROK_DOMAIN__ 127.0.0.1:8787 --config /home/hatch/.config/ngrok/ngrok.yml --log stdout --log-level info
+ExecStart="__NGROK_EXECUTABLE__" http --url=https://__NGROK_DOMAIN__ "__LISTEN_ADDRESS__" --config "__NGROK_CONFIG_FILE__" --log stdout --log-level info
 Restart=always
 RestartSec=10
 StandardOutput=append:__HOOK_DIR__/logs/ngrok.log
 StandardError=inherit
-# authtoken comes from /home/hatch/.config/ngrok/ngrok.yml (0600),
-# created from your own ngrok account's authtoken (see README.md).
+# authtoken comes from the private ngrok.config_file selected in shared config.
 
 [Install]
 WantedBy=multi-user.target

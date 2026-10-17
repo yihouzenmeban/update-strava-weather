@@ -11,6 +11,13 @@ fail() {
   exit 1
 }
 
+prepare_config() {
+  cp "$ROOT_DIR/project_config.py" "$ROOT_DIR/config.default.json" "$1/"
+  cat > "$1/config.local.json" <<'EOF'
+{"strava": {"client_id": "test-client-id", "client_secret": "test-client-secret"}}
+EOF
+}
+
 test_auth_does_not_require_activity_id() {
   local work_dir="$TMP_DIR/auth"
   local output
@@ -18,10 +25,7 @@ test_auth_does_not_require_activity_id() {
 
   mkdir -p "$work_dir"
   cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
-  cat > "$work_dir/strava_config.sh" <<'EOF'
-CLIENT_ID="test-client-id"
-CLIENT_SECRET="test-client-secret"
-EOF
+  prepare_config "$work_dir"
 
   set +e
   output=$(cd "$work_dir" && env -u ACTIVITY_ID ./update_strava_weather.sh auth 2>&1)
@@ -42,12 +46,8 @@ test_reorder_preserves_trailing_text() {
   cp "$ROOT_DIR/reorder_summitbag.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
   if [[ -f "$ROOT_DIR/weather_template.py" ]]; then
     cp "$ROOT_DIR/weather_template.py" "$work_dir/"
-    cp -R "$ROOT_DIR/templates" "$work_dir/"
   fi
-  cat > "$work_dir/strava_config.sh" <<'EOF'
-CLIENT_ID="test-client-id"
-CLIENT_SECRET="test-client-secret"
-EOF
+  prepare_config "$work_dir"
   cat > "$work_dir/.strava_tokens.json" <<'EOF'
 {"access_token":"test-access-token","refresh_token":"test-refresh-token","expires_at":4102444800}
 EOF
@@ -67,7 +67,7 @@ class FakeResponse:
         return self._body
 
 
-def fake_urlopen(request):
+def fake_urlopen(request, timeout=None):
     url = request.full_url
     if "/athlete/activities" in url:
         return FakeResponse([{"id": 1, "sport_type": "TrailRun"}])
@@ -101,7 +101,14 @@ PY
 我的天气 {emoji}
 气温 {t_min:.1f}～{t_max:.1f}°C
 EOF
-  echo 'WEATHER_TEMPLATE_FILE="custom.txt"' >> "$work_dir/strava_config.sh"
+  python3 - "$work_dir/config.local.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+config = json.loads(path.read_text())
+config["weather"] = {"template_file": "custom.txt"}
+path.write_text(json.dumps(config))
+PY
   output=$(cd "$work_dir" && PYTHONPATH="$work_dir" REORDER_CUSTOM=1 ./reorder_summitbag.sh)
   [[ "$output" == *"共 1 条活动需要调整"* ]] || fail "reorder did not recognize custom weather"
   occurrences=$(grep -o "活动后的重要备注" <<< "$output" | wc -l | tr -d ' ')
@@ -118,10 +125,7 @@ test_read_commands() {
   local work_dir="$TMP_DIR/read"
   mkdir -p "$work_dir/bin"
   cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
-  cat > "$work_dir/strava_config.sh" <<'EOF'
-CLIENT_ID="test-client-id"
-CLIENT_SECRET="test-client-secret"
-EOF
+  prepare_config "$work_dir"
   cat > "$work_dir/.strava_tokens.json" <<'EOF'
 {"access_token":"test-access-token","refresh_token":"test-refresh-token","expires_at":4102444800}
 EOF
@@ -273,10 +277,12 @@ case "${1:-all}" in
   reorder) test_reorder_preserves_trailing_text ;;
   read) test_read_commands ;;
   security) python3 "$ROOT_DIR/tests/security.py" ;;
+  config) python3 "$ROOT_DIR/tests/config.py" ;;
   sync) python3 "$ROOT_DIR/tests/sync.py" ;;
   templates) python3 "$ROOT_DIR/tests/templates.py" ;;
   webhook) python3 "$ROOT_DIR/tests/webhook.py" ;;
   all)
+    python3 "$ROOT_DIR/tests/config.py"
     test_auth_does_not_require_activity_id
     test_reorder_preserves_trailing_text
     test_read_commands

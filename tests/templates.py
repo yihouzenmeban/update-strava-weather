@@ -2,9 +2,11 @@
 """Template rendering and weather recognition, without external requests."""
 
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -21,6 +23,15 @@ MOUNTAINS = "⛰️ 馒头峪 (767 m) • ⛰️ 萝芭地北尖 (1,146 m) • �
 
 
 class TemplateTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="strava-template-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        shutil.copy2(ROOT / "config.default.json", root)
+        config_root = patch("weather_template.ROOT", root)
+        config_root.start()
+        self.addCleanup(config_root.stop)
+
     def test_default_output_is_unchanged(self):
         self.assertEqual(load_template().render(VALUES), DEFAULT)
 

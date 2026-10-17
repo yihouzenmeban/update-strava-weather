@@ -25,10 +25,9 @@ update-strava-weather/
 ├── strava_oauth.py                本地 OAuth 回调与 state 校验
 ├── strava_sync.py                 自动补齐天气、处理记录与并发锁
 ├── weather_template.py            天气模板渲染、识别与替换
-├── templates/weather.default.txt  默认天气描述模板（提交）
-├── weather.custom.txt             可选个人模板（gitignore）
-├── strava_config.example.sh        配置模板（提交）
-├── strava_config.sh                真实密钥（gitignore）
+├── config.default.json            全部默认配置，含天气模板（提交）
+├── config.local.json              个人配置与密钥，只填覆盖项（gitignore）
+├── project_config.py              共享加载、校验和旧配置迁移
 ├── .strava_tokens.json             令牌缓存（gitignore，自动生成）
 ├── .strava_weather_state.json      扫描进度、处理记录和待处理队列（gitignore，自动生成）
 ├── AGENTS.md                      共享中文贡献指南
@@ -47,17 +46,46 @@ update-strava-weather/
 
 1. 到 https://www.strava.com/settings/api 注册应用，拿到 Client ID / Client Secret。
 2. 把应用的 **Authorization Callback Domain** 设为 `localhost`。
-3. 复制配置模板并填入密钥：
-   ```bash
-   cp strava_config.example.sh strava_config.sh
-   chmod 600 strava_config.sh
-   # 编辑 strava_config.sh 填入 CLIENT_ID / CLIENT_SECRET
+3. 新建 `config.local.json` 并填入自己的应用密钥；已有旧配置时先按下文迁移：
+   ```json
+   {
+     "strava": {
+       "client_id": "你的 Client ID",
+       "client_secret": "你的 Client Secret"
+     }
+   }
    ```
+   运行 `chmod 600 config.local.json` 收紧权限。
 4. 授权（首次）：
    ```bash
    ./update_strava_weather.sh login
    ```
-   会自动开浏览器授权，回调到本地服务自动换令牌并缓存。授权 scope 含 `activity:read_all,activity:write`；回调校验随机 `state`，最多等待 5 分钟。
+   会自动开浏览器授权，回调到本地服务自动换令牌并缓存。授权 scope 含 `activity:read_all,activity:write`；回调校验随机 `state`，默认最多等待 5 分钟。
+
+## 配置
+
+所有默认值集中在 [config.default.json](config.default.json)，个人覆盖统一写入根目录 `config.local.json`（已 gitignore）。没有个人配置时直接使用默认值，不生成完整副本；只覆盖填写的字段，嵌套对象逐项合并，数组整体替换。真实 Strava 操作仍需提供自己的应用密钥并完成授权。
+
+| 配置组 | 内容 |
+| --- | --- |
+| `strava` | 应用密钥、OAuth 等待超时、列表默认数量及令牌提前刷新时间 |
+| `weather` | 模板正文 `template`、可选外部模板路径 `template_file`、山峰排序开关 |
+| `sync` | 分页大小、首次扫描及增量重叠天数 |
+| `webhook` | 验证令牌、同步延迟、监听地址及端口、回调路径、个人 Hooks |
+| `ngrok` | 域名、可执行文件路径、ngrok 自身配置文件路径 |
+| `http` | 连接、Strava 请求及天气请求超时 |
+| `backfill` | 历史补扫轮数及重试等待参数 |
+| `reorder` | 独立山峰排序脚本的分页、限流及请求间隔 |
+
+优先级：命令行参数 > 对应环境变量 > `config.local.json` > `config.default.json`。保留的配置环境变量为 `CLIENT_ID`、`CLIENT_SECRET`、`WEATHER_TEMPLATE_FILE`、`REORDER_SUMMITBAG`、`WEBHOOK_SYNC_DELAY_SECONDS`、`NGROK_DOMAIN`；其它字段通过 JSON 修改。`false`、`0` 和空数组不会被当作缺失。无效 JSON、未知字段和错误类型会报错，不会静默回退；可运行 `python3 project_config.py check` 离线校验，不输出配置值。
+
+旧版本升级时运行一次：
+
+```bash
+python3 project_config.py migrate
+```
+
+迁移会合并旧 `strava_config.sh`、`webhook/config.sh`、`webhook/receiver_config.json`，将其引用的天气模板正文一并纳入新文件；已有新配置字段优先，保留验证令牌和个人 Hooks。原文件不删除，但运行入口只读取新配置；确认迁移后可自行归档旧文件。令牌缓存、同步状态和日志属于运行数据，继续独立存放；ngrok 的 authtoken 仍由其自身私有配置管理。
 
 ## 用法
 
@@ -175,21 +203,16 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 
 ## 天气块模板
 
-默认模板见 [templates/weather.default.txt](templates/weather.default.txt)，保留原有温度、体感、湿度、风速字段，以及两位小数、空格、换行和署名。
+默认模板位于 `config.default.json` 的 `weather.template`，保留原有温度、体感、湿度、风速字段，以及两位小数、空格、换行和署名。
 
-自定义时先复制，再编辑 `weather.custom.txt`（已 gitignore）：
+自定义时只需在 `config.local.json` 中合入 `weather.template`，换行用 JSON 的 `\n` 表示，例如：
 
-```bash
-cp templates/weather.default.txt weather.custom.txt
-```
-
-例如改成：
-
-```text
-{emoji} 本次运动天气
-🌡️ {t_min:.1f}～{t_max:.1f}°C，体感 {at_min:.1f}～{at_max:.1f}°C
-💧 {h_min:.0f}～{h_max:.0f}% ｜ 💨 {w_min:.1f}～{w_max:.1f} km/h
-Not Powered By www.gearaut.com 🍚
+```json
+{
+  "weather": {
+    "template": "{emoji} 本次运动天气\n🌡️ {t_min:.1f}～{t_max:.1f}°C，体感 {at_min:.1f}～{at_max:.1f}°C\nNot Powered By www.gearaut.com 🍚"
+  }
+}
 ```
 
 | 字段 | 含义与单位 |
@@ -202,19 +225,13 @@ Not Powered By www.gearaut.com 🍚
 
 数值默认保留两位小数，可使用 `.0f` 至 `.6f` 指定精度；单位和文案由模板控制，删除某行即可隐藏相应字段。模板须为 UTF-8，包含固定文案以识别天气块。字面量花括号写成 `{{` 和 `}}`。不支持表达式、属性访问或条件语法；模板不存在、为空或字段错误时，`sync` 在请求 API 和写入处理记录之前报错。
 
-在 `strava_config.sh` 中配置后，手动运行、cron 和 webhook 都会使用该模板：
-
-```bash
-WEATHER_TEMPLATE_FILE="weather.custom.txt"
-```
-
-也可以临时选用并预览（`123` 替换为实际活动 ID）：
+手动运行、cron 和 webhook 共用该模板。已有独立模板文件时，也可设置 `weather.template_file`，或临时指定并预览（`123` 替换为实际活动 ID）：
 
 ```bash
 ./update_strava_weather.sh sync --activity-id 123 --force --dry-run --template weather.custom.txt
 ```
 
-优先级为 `--template` > 环境变量 `WEATHER_TEMPLATE_FILE` > 配置文件 > 默认模板。相对路径统一以仓库根目录为准。`WEATHER_DESC_FILE` 仍表示已经生成好的描述文本，不会解析其中的占位符。
+模板选择顺序为 `--template` > 环境变量 `WEATHER_TEMPLATE_FILE` > `weather.template_file` > `weather.template`；路径为空时使用正文。相对路径统一以仓库根目录为准。`WEATHER_DESC_FILE` 仍表示已经生成好的描述文本，不会解析其中的占位符。
 
 **防重复与更新规则：** 描述包含 `www.gearaut.com`，或完整匹配当前模板的固定文案、字段位置与换行，即视为已有天气。数值和天气 emoji 按类型匹配，不要求等于本次计算结果；同时兼容历史 gearaut / QWeather 天气块。只有标题 emoji 时仍会补齐描述。每次同步基于本次读取的数据判断，失败重试时重新读取并计算。
 
@@ -262,7 +279,7 @@ Powered By www.gearaut.com
 ./update_strava_weather.sh sync --no-reorder-summitbag
 ```
 
-长期关闭可在 `strava_config.sh` 中设置 `REORDER_SUMMITBAG=0`，也可通过同名环境变量临时覆盖。优先级为命令行 `--reorder-summitbag` / `--no-reorder-summitbag` > 环境变量 > 配置文件，默认 `1`。该配置同时适用于手动更新和独立的 `reorder_summitbag.sh`；独立脚本继续只处理越野跑活动。
+长期关闭可在 `config.local.json` 中设置 `"weather": {"reorder_summitbag": false}`，也可通过 `REORDER_SUMMITBAG=0` 临时覆盖。优先级为命令行 `--reorder-summitbag` / `--no-reorder-summitbag` > 环境变量 > 自定义配置 > 默认配置。该配置同时适用于手动更新和独立的 `reorder_summitbag.sh`；独立脚本继续只处理越野跑活动。
 
 ## AI Skill
 
@@ -272,7 +289,7 @@ Powered By www.gearaut.com
 
 ## 注意
 
-- `strava_config.sh` 和 `.strava_tokens.json` 含敏感信息，已 gitignore，勿提交。
+- `config.local.json` 和 `.strava_tokens.json` 含敏感信息，已 gitignore，勿提交。旧配置也继续忽略。
 - 脚本按令牌过期时间自动刷新；刷新失败时，`sync` 非交互退出并提示运行 `login`，其它交互命令会尝试浏览器重新授权。
 - 两个脚本会将现有凭据文件权限收紧为 `600`，拒绝符号链接和硬链接；新 token 通过私有临时文件原子替换。
 - Strava 网络请求中的密钥、token 和授权码通过标准输入传递。脚本在读取凭据前关闭 Shell 跟踪。优先使用 `login` 完成授权。

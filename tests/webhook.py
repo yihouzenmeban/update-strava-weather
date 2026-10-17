@@ -49,7 +49,8 @@ class WebhookTests(SyncFixture):
         hook = self.directory / "webhook"
         (hook / "logs").mkdir(parents=True)
         shutil.copy2(ROOT / "webhook/receiver.py", hook / "receiver.py")
-        (hook / "receiver_config.json").write_text(json.dumps({"verify_token": "synthetic-webhook-token"}))
+        self.config["webhook"] = {"verify_token": "synthetic-webhook-token"}
+        (self.directory / "config.local.json").write_text(json.dumps(self.config))
         spec = importlib.util.spec_from_file_location("receiver_under_test", hook / "receiver.py")
         self.receiver = importlib.util.module_from_spec(spec)
         with patch.dict(os.environ), patch("logging.basicConfig"), patch("logging.FileHandler", return_value=logging.NullHandler()):
@@ -119,13 +120,13 @@ class WebhookTests(SyncFixture):
     def prepare(self, description, template=None, disabled=False, cached=False):
         self.state.unlink(missing_ok=True)
         self.clear_requests()
-        config = 'CLIENT_ID="test-client-id"\nCLIENT_SECRET="test-client-secret"\n'
+        config = dict(self.config, weather={})
         if template:
             (self.directory / "custom.txt").write_text(template)
-            config += 'WEATHER_TEMPLATE_FILE="custom.txt"\n'
+            config["weather"]["template_file"] = "custom.txt"
         if disabled:
-            config += 'REORDER_SUMMITBAG=0\n'
-        (self.directory / "strava_config.sh").write_text(config)
+            config["weather"]["reorder_summitbag"] = False
+        (self.directory / "config.local.json").write_text(json.dumps(config))
         self.scenario["activity"] = dict(self.activity, description=description)
         (self.directory / "scenario.json").write_text(json.dumps(self.scenario))
         if cached:
@@ -238,19 +239,21 @@ class WebhookTests(SyncFixture):
         with patch.dict(os.environ):
             os.environ.pop("WEBHOOK_SYNC_DELAY_SECONDS", None)
             for config, expected in (({}, 60), ({"sync_delay_seconds": 120}, 120), ({"sync_delay_seconds": 0}, 0)):
-                with self.subTest(config=config), patch.object(self.receiver, "CONFIG", config):
+                with self.subTest(config=config):
+                    (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, webhook=config)))
                     self.assertEqual(self.receiver.sync_delay_seconds(), expected)
-            with patch.object(self.receiver, "CONFIG", {"sync_delay_seconds": 120}):
-                os.environ["WEBHOOK_SYNC_DELAY_SECONDS"] = "30"
-                self.assertEqual(self.receiver.sync_delay_seconds(), 30)
+            os.environ["WEBHOOK_SYNC_DELAY_SECONDS"] = "30"
+            self.assertEqual(self.receiver.sync_delay_seconds(), 30)
 
     def test_invalid_delay_is_rejected_before_any_worker_starts(self):
         with patch.dict(os.environ):
             os.environ.pop("WEBHOOK_SYNC_DELAY_SECONDS", None)
             for value in (-1, True, 1.5, "", "abc", "1; touch unexpected"):
-                with self.subTest(value=value), patch.object(self.receiver, "CONFIG", {"sync_delay_seconds": value}):
+                with self.subTest(value=value):
+                    (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, webhook={"sync_delay_seconds": value})))
                     with self.assertRaisesRegex(ValueError, "sync_delay_seconds"):
                         self.receiver.sync_delay_seconds()
+            (self.directory / "config.local.json").write_text(json.dumps(self.config))
             for value in ("-1", "1.5", "", "abc"):
                 os.environ["WEBHOOK_SYNC_DELAY_SECONDS"] = value
                 with self.subTest(environment=value), self.assertRaisesRegex(ValueError, "WEBHOOK_SYNC_DELAY_SECONDS"):
@@ -267,10 +270,11 @@ class WebhookTests(SyncFixture):
                 self.assertEqual(json.loads(recorded[-1]), [str(delay)])
 
     def test_generated_config_includes_default_delay(self):
-        self.receiver.CONFIG_FILE.unlink()
+        (self.directory / "config.local.json").unlink()
         config = self.receiver.load_config()
         self.assertEqual(config["sync_delay_seconds"], 60)
         self.assertEqual(self.receiver.CONFIG_FILE.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.receiver.CONFIG_FILE.read_text())["webhook"]["verify_token"], config["verify_token"])
 
     def test_handwritten_prefix_stays_first_through_webhook_and_forced_recompute(self):
         prefix = "⛰️ 今天的手写游记\n\n路线记录\n补给记录\n"

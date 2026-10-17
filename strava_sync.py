@@ -19,6 +19,7 @@ import urllib.request
 from urllib.parse import urlencode
 
 from weather_template import has_weather, load_template, reorder_summitbag
+from project_config import load_config
 
 
 ROOT = Path(__file__).resolve().parent
@@ -177,7 +178,7 @@ def weather_annotation(activity, location, template=None):
     start, end = start_date.timestamp(), start_date.timestamp() + duration
     url, key = weather_url(*location, start, end)
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:
+        with urllib.request.urlopen(url, timeout=load_config(ROOT)["http"]["weather_timeout_seconds"]) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as error:
         if error.code in (401, 403, 429):
@@ -228,7 +229,7 @@ def update_activity(args, activity, emoji="", description="", reorder_only=False
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
              "STRAVA_REORDER_ONLY": "1" if reorder_only else "0",
              "REORDER_SUMMITBAG": "1" if args.reorder_summitbag else "0",
-             "WEATHER_TEMPLATE_FILE": args.template}
+             "WEATHER_TEMPLATE_FILE": args.template or ""}
     with tempfile.TemporaryDirectory(prefix="strava-activity-") as directory:
         snapshot = Path(directory) / "activity.json"
         fd = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -301,7 +302,7 @@ def discover(args, state, state_path, now):
             raise SyncError("上次扫描时间晚于当前时间，请检查系统时钟和处理记录")
         after = state["scan_from"]
         if after is None:
-            after = max(0, (state["last_scan"] if state["last_scan"] is not None else now) - 7 * 86400)
+            after = max(0, (state["last_scan"] if state["last_scan"] is not None else now) - args.lookback_days * 86400)
         state["scan_from"] = after
         if not args.dry_run:
             save_state(state_path, state)
@@ -343,26 +344,31 @@ def discover(args, state, state_path, now):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="批量增量同步 Strava 活动天气，失败活动保留到队列")
+    try:
+        config = load_config(ROOT)
+    except ValueError as error:
+        parser.error(str(error))
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--activity-id", help="只处理指定活动，不查询列表")
     scope.add_argument("--all", action="store_true", help="分页补扫全部历史")
     scope.add_argument("--since", help="从此 UTC 日期开始补扫，格式 YYYY-MM-DD")
     parser.add_argument("--until", help="补扫截止 UTC 日期，包含当天；需与 --since 配合")
-    parser.add_argument("--page-size", type=int, default=50, help="每页活动数，默认 50，范围 1–200")
+    parser.add_argument("--page-size", type=int, default=config["sync"]["page_size"], help="每页活动数，默认取 sync.page_size，范围 1–200")
     parser.add_argument("--force", action="store_true", help="重算查询范围内活动，室内活动仍跳过")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写活动、队列或扫描进度")
-    parser.add_argument("--template", default=os.environ.get("WEATHER_TEMPLATE_FILE") or "templates/weather.default.txt",
+    parser.add_argument("--template", default=config["weather"]["template_file"] or None,
                         help="天气描述模板，优先于 WEATHER_TEMPLATE_FILE；相对路径以仓库根目录为准")
     ordering = parser.add_mutually_exclusive_group()
     ordering.add_argument("--reorder-summitbag", dest="reorder_summitbag", action="store_const", const="1",
-                          default=os.environ.get("REORDER_SUMMITBAG") or "1", help="将山峰数据移到天气前（默认开启）")
+                          default=str(int(config["weather"]["reorder_summitbag"])), help="将山峰数据移到天气前（默认开启）")
     ordering.add_argument("--no-reorder-summitbag", dest="reorder_summitbag", action="store_const", const="0",
                           help="关闭山峰排序，已处理活动按 ID 跳过")
     parser.add_argument("--latitude", type=float, help="指定单条活动的纬度")
     parser.add_argument("--longitude", type=float, help="指定单条活动的经度")
     args = parser.parse_args()
+    args.lookback_days = config["sync"]["lookback_days"]
     args.dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
-    if not args.template.strip():
+    if args.template is not None and not args.template.strip():
         parser.error("--template 必须指定天气模板文件路径")
     if args.reorder_summitbag not in ("0", "1"):
         parser.error("REORDER_SUMMITBAG 必须为 0 或 1")

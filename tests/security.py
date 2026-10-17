@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,7 @@ import urllib.request
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 SECRET = "dummy-client-secret"
 ACCESS = "dummy-access-token"
 REFRESH = "dummy-refresh-token"
@@ -71,7 +73,7 @@ class Response:
     headers = {}
     def __init__(self, value): self.value = value
     def read(self): return json.dumps(self.value).encode()
-def urlopen(request):
+def urlopen(request, timeout=None):
     with open("requests.jsonl", "a") as log:
         log.write(json.dumps({"method": request.get_method(), "url": request.full_url}) + "\n")
     if request.get_method() == "PUT":
@@ -89,20 +91,18 @@ class ScriptSecurityTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="strava-security-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        for name in ("update_strava_weather.sh", "reorder_summitbag.sh", "strava_common.sh", "strava_oauth.py", "weather_template.py"):
+        for name in ("update_strava_weather.sh", "reorder_summitbag.sh", "strava_common.sh", "strava_oauth.py",
+                     "weather_template.py", "project_config.py", "config.default.json"):
             source = ROOT / name
             if source.exists():
                 shutil.copy2(source, self.directory)
-        if (ROOT / "templates").exists():
-            shutil.copytree(ROOT / "templates", self.directory / "templates")
-        (self.directory / "strava_config.sh").write_text(
-            f'CLIENT_ID="dummy-client-id"\nCLIENT_SECRET="{SECRET}"\n'
-        )
+        (self.directory / "config.local.json").write_text(json.dumps(
+            {"strava": {"client_id": "dummy-client-id", "client_secret": SECRET}}))
         self.token_file = self.directory / ".strava_tokens.json"
         self.token_file.write_text(json.dumps({
             "access_token": ACCESS, "refresh_token": REFRESH, "expires_at": 4102444800,
         }))
-        for path in (self.token_file, self.directory / "strava_config.sh"):
+        for path in (self.token_file, self.directory / "config.local.json"):
             path.chmod(0o644)
         (self.directory / "bin").mkdir()
         mock = self.directory / "bin/curl"
@@ -135,10 +135,10 @@ class ScriptSecurityTests(unittest.TestCase):
     def test_existing_credentials_are_private_on_both_entrypoints(self):
         for script, args in (("update_strava_weather.sh", ("list",)), ("reorder_summitbag.sh", ())):
             with self.subTest(script=script):
-                for path in (self.token_file, self.directory / "strava_config.sh"):
+                for path in (self.token_file, self.directory / "config.local.json"):
                     path.chmod(0o644)
                 self.assert_success(self.run_script(script, *args))
-                for path in (self.token_file, self.directory / "strava_config.sh"):
+                for path in (self.token_file, self.directory / "config.local.json"):
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_token_exchange_and_both_refresh_paths_save_private_tokens(self):
@@ -222,6 +222,17 @@ class ScriptSecurityTests(unittest.TestCase):
     def test_reorder_still_writes_when_explicitly_enabled(self):
         self.assert_success(self.run_script("reorder_summitbag.sh", YES="1"))
         self.assertIn("PUT", [entry["method"] for entry in self.requests()])
+
+    def test_reorder_and_read_use_shared_paging_defaults(self):
+        path = self.directory / "config.local.json"
+        config = json.loads(path.read_text())
+        config["strava"]["list_count"] = 7
+        config["reorder"] = {"page_size": 17, "request_interval_milliseconds": 0}
+        path.write_text(json.dumps(config))
+        self.assert_success(self.run_script("update_strava_weather.sh", "list"))
+        self.assertIn("per_page=7", self.requests()[0]["url"])
+        self.assert_success(self.run_script("reorder_summitbag.sh"))
+        self.assertTrue(any("per_page=17" in entry["url"] for entry in self.requests()))
 
     def test_symlinked_token_cache_is_rejected_without_changing_target(self):
         target = self.directory / "other.json"

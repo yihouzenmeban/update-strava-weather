@@ -1,4 +1,6 @@
 # Strava 应用密钥（含 CLIENT_SECRET，敏感）
+config.local.json
+.config.local.*
 strava_config.sh
 strava_config.sh.*
 

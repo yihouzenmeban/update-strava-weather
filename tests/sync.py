@@ -99,12 +99,12 @@ class SyncFixture(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="strava-sync-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        for name in ("update_strava_weather.sh", "strava_common.sh", "strava_sync.py", "weather_template.py"):
+        for name in ("update_strava_weather.sh", "strava_common.sh", "strava_sync.py", "weather_template.py",
+                     "project_config.py", "config.default.json"):
             if (ROOT / name).exists():
                 shutil.copy2(ROOT / name, self.directory)
-        if (ROOT / "templates").exists():
-            shutil.copytree(ROOT / "templates", self.directory / "templates")
-        (self.directory / "strava_config.sh").write_text('CLIENT_ID="test-client-id"\nCLIENT_SECRET="test-client-secret"\n')
+        self.config = {"strava": {"client_id": "test-client-id", "client_secret": "test-client-secret"}}
+        (self.directory / "config.local.json").write_text(json.dumps(self.config))
         (self.directory / ".strava_tokens.json").write_text(json.dumps({
             "access_token": "test-access-token", "refresh_token": "test-refresh-token", "expires_at": 4102444800,
         }))
@@ -154,6 +154,20 @@ class SyncFixture(unittest.TestCase):
 
 
 class SyncTests(SyncFixture):
+    def test_inline_template_and_scan_defaults_come_from_shared_config(self):
+        (self.directory / "config.local.json").write_text(json.dumps(dict(self.config,
+            weather={"template": "天气 {t_min:.1f}～{t_max:.1f}°C"}, sync={"page_size": 17, "lookback_days": 2})))
+        self.assert_success(self.sync())
+        self.assertEqual(self.requests()[-1]["body"]["description"], "原备注\n天气 22.0～26.0°C")
+        query = parse_qs(urlsplit(self.requests()[0]["url"]).query)
+        self.assertEqual(query["per_page"], ["17"])
+        self.assertAlmostEqual(int(query["before"][0]) - int(query["after"][0]), 2 * 86400, delta=2)
+
+    def test_without_custom_file_environment_credentials_use_default_behavior(self):
+        (self.directory / "config.local.json").unlink()
+        self.assert_success(self.sync("--activity-id", "123", CLIENT_ID="test-client-id", CLIENT_SECRET="test-client-secret"))
+        self.assertIn("Not Powered By www.gearaut.com 🍚", self.requests()[-1]["body"]["description"])
+
     def test_missing_weather_is_written_once_and_cached_with_private_permissions(self):
         self.activity["description"] += "\nhttps://summitbag.com/example"
         self.assert_success(self.sync())
@@ -299,15 +313,14 @@ class SyncTests(SyncFixture):
         self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
 
     def test_reorder_disable_from_config_environment_or_cli_and_enable_override(self):
-        config = self.directory / "strava_config.sh"
-        original = config.read_text()
+        config = self.directory / "config.local.json"
         self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
         cases = (("0", {}, (), False), ("1", {"REORDER_SUMMITBAG": "0"}, (), False),
                  ("1", {}, ("--no-reorder-summitbag",), False),
                  ("0", {}, ("--reorder-summitbag",), True))
         for setting, environment, arguments, changed in cases:
             with self.subTest(setting=setting, environment=environment, arguments=arguments):
-                config.write_text(original + f'REORDER_SUMMITBAG="{setting}"\n')
+                config.write_text(json.dumps(dict(self.config, weather={"reorder_summitbag": setting == "1"})))
                 self.state.unlink(missing_ok=True)
                 self.clear_requests()
                 self.assert_success(self.sync(*arguments, **environment))
@@ -409,14 +422,13 @@ class SyncTests(SyncFixture):
     def test_custom_template_is_selected_from_config_or_environment_and_cli_takes_priority(self):
         self.activity["description"] += "\nhttps://summitbag.com/example"
         (self.directory / "custom.txt").write_text("我的天气 {emoji}\n气温 {t_min:.1f}～{t_max:.1f}°C\n风速 {w_max:.0f} km/h\n")
-        config = self.directory / "strava_config.sh"
-        original = config.read_text()
+        config = self.directory / "config.local.json"
         for source in ("config", "environment", "cli"):
             with self.subTest(source=source):
                 self.state.unlink(missing_ok=True)
                 self.clear_requests()
                 configured = "custom.txt" if source == "config" else "missing.txt"
-                config.write_text(original + f'WEATHER_TEMPLATE_FILE="{configured}"\n')
+                config.write_text(json.dumps(dict(self.config, weather={"template_file": configured})))
                 arguments = ("--template", "custom.txt") if source == "cli" else ()
                 environment = {"WEATHER_TEMPLATE_FILE": "missing.txt" if source == "cli" else "custom.txt"} if source != "config" else {}
                 self.assert_success(self.sync("--activity-id", "123", *arguments, **environment))
@@ -636,15 +648,25 @@ class SyncTests(SyncFixture):
 
 
 class WeatherMathTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="strava-math-")
+        self.addCleanup(temporary.cleanup)
+        self.config_root = Path(temporary.name)
+        shutil.copy2(ROOT / "config.default.json", self.config_root)
+        config_root = patch("weather_template.ROOT", self.config_root)
+        config_root.start()
+        self.addCleanup(config_root.stop)
+
     def load_module(self):
         spec = importlib.util.spec_from_file_location("strava_sync", ROOT / "strava_sync.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        module.ROOT = self.config_root
         return module
 
     def test_activity_snapshot_handoff_is_private_and_cleaned_up(self):
         module = self.load_module()
-        args = module.argparse.Namespace(dry_run=False, reorder_summitbag=True, template="templates/weather.default.txt")
+        args = module.argparse.Namespace(dry_run=False, reorder_summitbag=True, template=None)
         activity = {"id": 123, "name": "晨跑", "description": "手写备注"}
         snapshots = []
 
@@ -713,6 +735,7 @@ class WeatherMathTests(unittest.TestCase):
         module = self.load_module()
         with tempfile.TemporaryDirectory(prefix="strava-state-") as directory:
             root = Path(directory)
+            shutil.copy2(ROOT / "config.default.json", root)
             activities = [{"id": 123}, {"id": 124}]
             calls = []
 

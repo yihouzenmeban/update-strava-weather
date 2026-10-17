@@ -4,6 +4,8 @@ from pathlib import Path
 import re
 from string import Formatter
 
+from project_config import load_config
+
 
 ROOT = Path(__file__).resolve().parent
 NUMERIC_FIELDS = frozenset(("t_min", "t_max", "at_min", "at_max", "h_min", "h_max", "w_min", "w_max"))
@@ -51,7 +53,11 @@ class WeatherTemplate:
 
 
 def load_template(path=None):
-    selected = Path(path) if path else Path("templates/weather.default.txt")
+    config = load_config(ROOT)["weather"]
+    selected = path or config["template_file"]
+    if not selected:
+        return WeatherTemplate(config["template"])
+    selected = Path(selected)
     if not selected.is_absolute():
         selected = ROOT / selected
     try:
