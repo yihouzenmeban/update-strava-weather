@@ -1,0 +1,7 @@
+# 本机实例文件，不提交
+config.sh
+receiver_config.json
+.subscription_registered
+logs/
+__pycache__/
+*.pyc

@@ -1,0 +1,16 @@
+[Unit]
+Description=Strava webhook receiver (weather annotation trigger)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 __HOOK_DIR__/receiver.py
+Restart=always
+RestartSec=5
+StandardOutput=append:__HOOK_DIR__/logs/receiver.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

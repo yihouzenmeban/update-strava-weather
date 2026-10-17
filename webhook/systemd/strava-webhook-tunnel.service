@@ -1,0 +1,23 @@
+[Unit]
+Description=ngrok tunnel for Strava webhooks
+After=network-online.target strava-webhook-receiver.service
+Wants=network-online.target
+Requires=strava-webhook-receiver.service
+
+[Service]
+Type=simple
+User=root
+# ngrok must NOT see proxy env vars, otherwise the free plan refuses the
+# connection. Direct egress needs the "other TCP connections" toggle enabled
+# in the Muse App (Direct network protocol settings).
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+ExecStart=/home/hatch/bin/ngrok http --url=https://__NGROK_DOMAIN__ 127.0.0.1:8787 --config /home/hatch/.config/ngrok/ngrok.yml --log stdout --log-level info
+Restart=always
+RestartSec=10
+StandardOutput=append:__HOOK_DIR__/logs/ngrok.log
+StandardError=inherit
+# authtoken comes from /home/hatch/.config/ngrok/ngrok.yml (0600),
+# created from your own ngrok account's authtoken (see README.md).
+
+[Install]
+WantedBy=multi-user.target

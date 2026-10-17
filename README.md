@@ -147,6 +147,20 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 - `DRY_RUN=1` 仅预览
 - `YES=1` 跳过确认
 
+## 运行模式（二选一，可并存）
+
+**模式一：定时任务（独立运行，开箱即用）**
+适合只想"每隔一段时间扫一遍新活动"的用户，不需要公网回调。
+用 cron / systemd timer 定时跑 `./update_strava_weather.sh sync`
+（成功静默、失败告警）；历史补扫用 `./backfill_all.sh`。
+Strava 应用默认限流 100 次/15 分钟、1000 次/天，轮询完全够用。
+
+**模式二：webhook 实时推送（需要公网回调）**
+Strava 有新活动时官方把事件推送到你的回调地址，
+`webhook/receiver.py` 收到后等 60 秒再触发单活动同步，
+每个新活动只花 2 次 API 调用。详见 `webhook/README.md`。
+两种模式可并存（webhook 为主、定时为兜底），也可只选其一。
+
 ## 天气块模板
 
 ```

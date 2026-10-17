@@ -29,6 +29,15 @@ WEATHER_BLOCK = re.compile(
     r"(?:Not Powered By www\.gearaut\.com [🍚👻]|Powered By (?:www\.gearaut\.com|QWeather \(www\.qweather\.com\)))(?:\r?$)", re.M,
 )
 
+# Title emojis appended by weather_annotation (must stay in sync with it).
+WEATHER_TITLE_EMOJIS = ("⛈️", "❄️", "🌧️", "🌫️", "🌙", "☁️", "⛅", "🌞", "💨", "🥵", "🥶")
+
+
+def has_weather_title(name):
+    """True if the activity title already ends with our weather emoji."""
+    tail = (name or "").rstrip()
+    return any(tail.endswith(emoji) for emoji in WEATHER_TITLE_EMOJIS)
+
 
 class SyncError(Exception):
     pass
@@ -239,8 +248,8 @@ def process_activity(args, activity_id, activities, force=False):
     if activity.get("trainer") or str(activity.get("sport_type", "")).startswith("Virtual"):
         print(f"⏭️ 活动 {activity_id} 为室内活动，跳过")
         return "indoor"
-    if not force and has_weather(activity.get("description")):
-        print(f"⏭️ 活动 {activity_id} 已有完整天气块，跳过")
+    if not force and (has_weather(activity.get("description")) or has_weather_title(activity.get("name"))):
+        print(f"⏭️ 活动 {activity_id} 标题/描述已有天气标注，跳过")
         return "existing"
     location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
     if location is None:

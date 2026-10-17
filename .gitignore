@@ -17,3 +17,6 @@ __pycache__/
 
 # 系统杂物
 .DS_Store
+
+# 补扫运行日志
+backfill-all.log
