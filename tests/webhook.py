@@ -31,7 +31,7 @@ EVENT = {"object_type": "activity", "aspect_type": "create", "object_id": 123,
 SLEEP_MOCK = '''#!/usr/bin/env python3
 import json, os, sys, time
 from pathlib import Path
-assert sys.argv[1:] == ["60"], sys.argv
+assert sys.argv[1:] == [os.environ.get("WEBHOOK_TEST_EXPECTED_DELAY", "60")], sys.argv
 with Path("webhook-delays.jsonl").open("a") as output:
     output.write(json.dumps(sys.argv[1:]) + "\\n")
 gate = os.environ.get("WEBHOOK_TEST_GATE")
@@ -52,7 +52,8 @@ class WebhookTests(SyncFixture):
         (hook / "receiver_config.json").write_text(json.dumps({"verify_token": "synthetic-webhook-token"}))
         spec = importlib.util.spec_from_file_location("receiver_under_test", hook / "receiver.py")
         self.receiver = importlib.util.module_from_spec(spec)
-        with patch("logging.basicConfig"), patch("logging.FileHandler", return_value=logging.NullHandler()):
+        with patch.dict(os.environ), patch("logging.basicConfig"), patch("logging.FileHandler", return_value=logging.NullHandler()):
+            os.environ.pop("WEBHOOK_SYNC_DELAY_SECONDS", None)
             spec.loader.exec_module(self.receiver)
         log_patch = patch.object(self.receiver, "log")
         log_patch.start()
@@ -62,6 +63,7 @@ class WebhookTests(SyncFixture):
         sleep.write_text(SLEEP_MOCK)
         sleep.chmod(0o755)
         self.environment.pop("WEBHOOK_TEST_GATE", None)
+        self.environment.pop("WEBHOOK_TEST_EXPECTED_DELAY", None)
         self.children = []
         self.addCleanup(self.stop_children)
         self.server = HTTPServer(("127.0.0.1", 0), self.receiver.Handler)
@@ -87,8 +89,8 @@ class WebhookTests(SyncFixture):
         real_popen = subprocess.Popen
 
         def spawn(command, **kwargs):
-            self.assertEqual(command, ["/bin/bash", "-c", 'sleep 60; exec "$1" sync --activity-id "$2"',
-                                       "delayed-sync", str(self.receiver.SYNC_SCRIPT), "123"])
+            self.assertEqual(command, ["/bin/bash", "-c", 'sleep "$1"; exec "$2" sync --activity-id "$3"',
+                                       "delayed-sync", str(self.receiver.SYNC_DELAY_SECONDS), str(self.receiver.SYNC_SCRIPT), "123"])
             self.assertTrue(kwargs["start_new_session"])
             self.assertEqual(Path(kwargs["cwd"]), self.directory.resolve())
             child = real_popen(command, env=self.environment, **kwargs)
@@ -125,7 +127,6 @@ class WebhookTests(SyncFixture):
             config += 'REORDER_SUMMITBAG=0\n'
         (self.directory / "strava_config.sh").write_text(config)
         self.scenario["activity"] = dict(self.activity, description=description)
-        self.scenario["fresh"] = dict(self.scenario["activity"])
         (self.directory / "scenario.json").write_text(json.dumps(self.scenario))
         if cached:
             self.state.write_text(json.dumps({"version": 2, "activities": {"123": "updated"},
@@ -142,10 +143,12 @@ class WebhookTests(SyncFixture):
         writes = [entry["body"] for entry in requests if entry.get("method") == "PUT"]
         self.assertEqual(len(writes), int(expected != description))
         if writes:
-            self.assertEqual(writes[0]["description"], expected)
-            self.assertEqual(writes[0]["name"], "晨跑 🌧️🥵" if creates_weather else "晨跑")
+            payload = {"description": expected}
+            if creates_weather:
+                payload["name"] = "晨跑 🌧️🥵"
+            self.assertEqual(writes[0], payload)
         self.assertEqual(sum(entry["kind"] == "weather" for entry in requests), int(creates_weather))
-        self.assertEqual(sum(entry["kind"] == "strava" for entry in requests), 3 if writes else 1)
+        self.assertEqual(sum(entry["kind"] == "strava" for entry in requests), 2 if writes else 1)
         self.assertFalse(any("/athlete/activities?" in entry["url"] for entry in requests))
 
     def test_create_event_sorts_varied_existing_weather_formats(self):
@@ -187,7 +190,6 @@ class WebhookTests(SyncFixture):
         self.assert_result(LEGACY + "\n" + MOUNTAINS, MOUNTAINS + "\n" + LEGACY, cached=True)
         body = self.requests()[-1]["body"]
         self.scenario["activity"].update(body)
-        self.scenario["fresh"].update(body)
         (self.directory / "scenario.json").write_text(json.dumps(self.scenario))
         self.clear_requests()
         self.post_event()
@@ -231,6 +233,50 @@ class WebhookTests(SyncFixture):
         self.assertEqual(self.requests()[-1]["body"]["description"], MOUNTAINS + "\n" + LEGACY)
         self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
         self.assertEqual(json.loads(self.state.read_text())["pending"], {})
+
+    def test_delay_configuration_default_file_and_environment_override(self):
+        with patch.dict(os.environ):
+            os.environ.pop("WEBHOOK_SYNC_DELAY_SECONDS", None)
+            for config, expected in (({}, 60), ({"sync_delay_seconds": 120}, 120), ({"sync_delay_seconds": 0}, 0)):
+                with self.subTest(config=config), patch.object(self.receiver, "CONFIG", config):
+                    self.assertEqual(self.receiver.sync_delay_seconds(), expected)
+            with patch.object(self.receiver, "CONFIG", {"sync_delay_seconds": 120}):
+                os.environ["WEBHOOK_SYNC_DELAY_SECONDS"] = "30"
+                self.assertEqual(self.receiver.sync_delay_seconds(), 30)
+
+    def test_invalid_delay_is_rejected_before_any_worker_starts(self):
+        with patch.dict(os.environ):
+            os.environ.pop("WEBHOOK_SYNC_DELAY_SECONDS", None)
+            for value in (-1, True, 1.5, "", "abc", "1; touch unexpected"):
+                with self.subTest(value=value), patch.object(self.receiver, "CONFIG", {"sync_delay_seconds": value}):
+                    with self.assertRaisesRegex(ValueError, "sync_delay_seconds"):
+                        self.receiver.sync_delay_seconds()
+            for value in ("-1", "1.5", "", "abc"):
+                os.environ["WEBHOOK_SYNC_DELAY_SECONDS"] = value
+                with self.subTest(environment=value), self.assertRaisesRegex(ValueError, "WEBHOOK_SYNC_DELAY_SECONDS"):
+                    self.receiver.sync_delay_seconds()
+        self.assertEqual(self.children, [])
+
+    def test_configurable_delay_reaches_the_detached_worker(self):
+        for delay in (0, 120):
+            with self.subTest(delay=delay), patch.dict(os.environ, {"WEBHOOK_SYNC_DELAY_SECONDS": str(delay)}):
+                self.receiver.SYNC_DELAY_SECONDS = self.receiver.sync_delay_seconds()
+                self.environment["WEBHOOK_TEST_EXPECTED_DELAY"] = str(delay)
+                self.assert_result(DEFAULT, DEFAULT)
+                recorded = (self.directory / "webhook-delays.jsonl").read_text().splitlines()
+                self.assertEqual(json.loads(recorded[-1]), [str(delay)])
+
+    def test_generated_config_includes_default_delay(self):
+        self.receiver.CONFIG_FILE.unlink()
+        config = self.receiver.load_config()
+        self.assertEqual(config["sync_delay_seconds"], 60)
+        self.assertEqual(self.receiver.CONFIG_FILE.stat().st_mode & 0o777, 0o600)
+
+    def test_handwritten_prefix_stays_first_through_webhook_and_forced_recompute(self):
+        prefix = "⛰️ 今天的手写游记\n\n路线记录\n补给记录\n"
+        self.assert_result(MOUNTAINS + "\n" + prefix + LEGACY, prefix + MOUNTAINS + "\n" + LEGACY)
+        self.assert_success(self.sync("--activity-id", "123", "--force"))
+        self.assertEqual(self.requests()[-1]["body"]["description"], prefix + MOUNTAINS + "\n" + DEFAULT)
 
 
 if __name__ == "__main__":

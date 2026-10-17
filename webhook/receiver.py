@@ -5,7 +5,7 @@ Listens on 127.0.0.1 only (ngrok is the sole ingress). Handles:
   GET  /strava-webhook  -> Strava subscription verification (hub.challenge)
   POST /strava-webhook  -> activity events; on activity/create spawns a detached
                            `update_strava_weather.sh sync --activity-id <id>`
-                           after a 60s delay (lets Strava finish processing
+                           after a configurable delay (60s by default; lets Strava finish processing
                            the activity's GPS data and final title)
   GET  /health          -> liveness probe for the watchdog
 
@@ -50,7 +50,7 @@ log = logging.getLogger("receiver")
 def load_config():
     if CONFIG_FILE.exists():
         return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    config = {"verify_token": secrets.token_urlsafe(32)}
+    config = {"verify_token": secrets.token_urlsafe(32), "sync_delay_seconds": 60}
     fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
@@ -62,22 +62,40 @@ def load_config():
 CONFIG = load_config()
 
 
+def sync_delay_seconds():
+    if "WEBHOOK_SYNC_DELAY_SECONDS" in os.environ:
+        setting, value = "WEBHOOK_SYNC_DELAY_SECONDS", os.environ["WEBHOOK_SYNC_DELAY_SECONDS"]
+    else:
+        setting, value = "sync_delay_seconds", CONFIG.get("sync_delay_seconds", 60)
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    raise ValueError(f"{setting} 必须为非负整数（秒）")
+
+
+SYNC_DELAY_SECONDS = sync_delay_seconds()
+
+
 def trigger_sync(activity_id):
     """Spawn a detached per-activity sync; never blocks the HTTP response.
 
     Strava fires the create event as soon as the activity exists, but its GPS
     data and final title can take a little while to finish processing, so the
-    sync waits 60s before fetching the activity details.
+    sync waits the configured delay before fetching the activity details.
     """
     if not SYNC_SCRIPT.exists():
         log.error("sync script missing: %s", SYNC_SCRIPT)
         return
-    log.info("triggering sync for activity %s (60s delay)", activity_id)
+    log.info("triggering sync for activity %s (%ss delay)", activity_id, SYNC_DELAY_SECONDS)
     log_out = open(ROOT / "logs" / f"sync-{activity_id}.log", "a", encoding="utf-8")
     try:
         subprocess.Popen(
-            ["/bin/bash", "-c", "sleep 60; exec \"$1\" sync --activity-id \"$2\"",
-             "delayed-sync", str(SYNC_SCRIPT), str(activity_id)],
+            ["/bin/bash", "-c", 'sleep "$1"; exec "$2" sync --activity-id "$3"',
+             "delayed-sync", str(SYNC_DELAY_SECONDS), str(SYNC_SCRIPT), str(activity_id)],
             stdout=log_out,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

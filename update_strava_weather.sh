@@ -199,11 +199,15 @@ do_update() (
   trap 'rm -rf "$work_dir"' EXIT
   body_file="$work_dir/body.json"
 
-  # 1) 拉取活动当前内容
-  echo "→ 拉取活动 $ACTIVITY_ID 当前内容..."
-  code=$(strava_curl "$access" -o "$work_dir/activity.json" -w "%{http_code}" \
-    "https://www.strava.com/api/v3/activities/${ACTIVITY_ID}") || die "Strava API 网络请求失败"
-  check_api_status "$code"
+  # sync 已读取详情；手动更新时在这里读取一次。
+  if [[ -n "${STRAVA_SYNC_ACTIVITY_FILE:-}" ]]; then
+    cp "$STRAVA_SYNC_ACTIVITY_FILE" "$work_dir/activity.json" || die "无法读取活动快照"
+  else
+    echo "→ 拉取活动 $ACTIVITY_ID 当前内容..."
+    code=$(strava_curl "$access" -o "$work_dir/activity.json" -w "%{http_code}" \
+      "https://www.strava.com/api/v3/activities/${ACTIVITY_ID}") || die "Strava API 网络请求失败"
+    check_api_status "$code"
+  fi
 
   # 2) 计算追加后的 name / description，写到 body 文件
   WEATHER_EMOJI="$WEATHER_EMOJI" WEATHER_DESC="$WEATHER_DESC" \
@@ -211,7 +215,7 @@ do_update() (
 import json, sys, os, re
 
 sys.path.insert(0, sys.argv[3])
-from weather_template import has_weather, load_template, reorder_summitbag, strip_weather
+from weather_template import load_template, reorder_summitbag, strip_weather
 
 try:
     template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
@@ -219,9 +223,15 @@ except ValueError as error:
     print(f"❌ {error}", file=sys.stderr)
     sys.exit(1)
 
-act = json.load(open(sys.argv[1], encoding="utf-8"))
-if "id" not in act:
-    print("❌ 拉取活动失败:", json.dumps(act, ensure_ascii=False)[:300]); sys.exit(1)
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        act = json.load(source)
+except (OSError, ValueError):
+    print("❌ 无法读取有效活动数据", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(act, dict) or str(act.get("id")) != os.environ["ACTIVITY_ID"]:
+    print("❌ 活动 ID 与目标不一致或数据无效", file=sys.stderr)
+    sys.exit(1)
 
 # 跑步机等室内活动没有真实户外天气，跳过天气标注
 # 判定：trainer=true（ treadmill ）或 sport_type 为 Virtual* 系列
@@ -237,14 +247,10 @@ if (is_trainer or is_virtual) and os.environ.get("FORCE", "") != "1":
 name = act.get("name", "") or ""
 desc = act.get("description", "") or ""
 reorder_enabled = os.environ.get("REORDER_SUMMITBAG") == "1"
-reorder_only = os.environ.get("STRAVA_REORDER_ONLY") == "1" or (
-    os.environ.get("STRAVA_SYNC_CHECK_WEATHER") == "1" and has_weather(desc, template))
+reorder_only = os.environ.get("STRAVA_REORDER_ONLY") == "1"
 if reorder_only:
     new_name = name
     new_desc = reorder_summitbag(desc, template, reorder_enabled)
-    if new_desc == desc:
-        print("⏭️ 保留最新天气，山峰无需排序，不重复写入")
-        sys.exit(3)
 else:
     emoji = os.environ["WEATHER_EMOJI"].strip()
     block = os.environ["WEATHER_DESC"].strip()
@@ -267,7 +273,12 @@ else:
         new_desc = desc_clean
     new_desc = reorder_summitbag(new_desc, template, reorder_enabled)
 
-json.dump({"name": new_name, "description": new_desc},
+updates = {key: value for key, value, previous in (("name", new_name, name), ("description", new_desc, desc))
+           if value != previous}
+if not updates:
+    print("⏭️ 标题和描述没有变化，不更新")
+    sys.exit(0)
+json.dump(updates,
           open(sys.argv[2], "w", encoding="utf-8"), ensure_ascii=False)
 print("  原标题:", name)
 print("  新标题:", new_name)
@@ -276,6 +287,8 @@ if desc:
 print("  新描述:")
 print(new_desc)
 PY
+
+  [[ -f "$body_file" ]] || return 0
 
   # 3) 确认后再覆盖（DRY_RUN=1 仅预览不更新；YES=1 跳过确认）
   if [[ "${DRY_RUN:-}" == "1" ]]; then

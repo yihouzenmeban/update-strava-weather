@@ -223,14 +223,19 @@ def weather_annotation(activity, location, template=None):
     return emoji, description
 
 
-def update_activity(args, activity_id, emoji="", description="", force=False, reorder_only=False):
+def update_activity(args, activity, emoji="", description="", reorder_only=False):
     extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "", "WEATHER_DESC_FILE": "",
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
-             "STRAVA_SYNC_CHECK_WEATHER": "0" if force else "1",
              "STRAVA_REORDER_ONLY": "1" if reorder_only else "0",
              "REORDER_SUMMITBAG": "1" if args.reorder_summitbag else "0",
              "WEATHER_TEMPLATE_FILE": args.template}
-    result = invoke("show" if args.dry_run else "run", activity_id, extra)
+    with tempfile.TemporaryDirectory(prefix="strava-activity-") as directory:
+        snapshot = Path(directory) / "activity.json"
+        fd = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(activity, output, ensure_ascii=False)
+        extra["STRAVA_SYNC_ACTIVITY_FILE"] = str(snapshot)
+        result = invoke("show" if args.dry_run else "run", str(activity["id"]), extra)
     if result.returncode not in (0, 2, 3):
         raise script_error(result, "Strava 写入失败，未记录成功")
     print(result.stdout.strip())
@@ -251,7 +256,7 @@ def process_activity(args, activity_id, activities, force=False):
     if not force and (cached or has_weather(activity.get("description"), args.weather_template)):
         description = activity.get("description") or ""
         if reorder_summitbag(description, args.weather_template, args.reorder_summitbag) != description:
-            return update_activity(args, activity_id, reorder_only=True)
+            return update_activity(args, activity, reorder_only=True)
         print(f"⏭️ 活动 {activity_id} 天气已处理，山峰无需排序")
         return None if cached else "existing"
     location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
@@ -267,7 +272,7 @@ def process_activity(args, activity_id, activities, force=False):
     if location is None:
         raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
     emoji, description = weather_annotation(activity, location, args.weather_template)
-    return update_activity(args, activity_id, emoji, description, force=force)
+    return update_activity(args, activity, emoji, description)
 
 
 def enqueue(state, activity_id, force, reorder=False):

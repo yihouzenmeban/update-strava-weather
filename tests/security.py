@@ -113,7 +113,8 @@ class ScriptSecurityTests(unittest.TestCase):
         self.runtime.mkdir()
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "WEATHER_DESC", "WEATHER_DESC_FILE",
-                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG", "CLIENT_SECRET", "CLIENT_ID"):
+                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG",
+                     "STRAVA_SYNC_ACTIVITY_FILE", "STRAVA_REORDER_ONLY", "CLIENT_SECRET", "CLIENT_ID"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
                                 PYTHONPATH=str(self.directory), TMPDIR=str(self.runtime))
@@ -197,6 +198,26 @@ class ScriptSecurityTests(unittest.TestCase):
                 self.assert_success(self.run_script(script, *args, ACTIVITY_ID="123", YES="1", DRY_RUN="1"))
                 self.assertTrue(self.requests())
                 self.assertTrue(all(entry["method"] == "GET" for entry in self.requests()))
+
+    def test_manual_updates_send_only_changed_fields_and_skip_noop(self):
+        for emoji, description, expected in (("", "天气说明", {"description": "原备注\n天气说明"}),
+                                             ("🌞", "", {"name": "晨跑 🌞"}), ("", "", None)):
+            with self.subTest(emoji=emoji, description=description):
+                (self.directory / "requests.jsonl").unlink(missing_ok=True)
+                self.assert_success(self.run_script("update_strava_weather.sh", ACTIVITY_ID="123", YES="1",
+                                                     WEATHER_EMOJI=emoji, WEATHER_DESC=description))
+                writes = [entry["body"] for entry in self.requests() if entry["method"] == "PUT"]
+                self.assertEqual(writes, [expected] if expected else [])
+                self.assertEqual(list(self.runtime.iterdir()), [])
+
+    def test_snapshot_must_match_the_target_activity(self):
+        snapshot = self.directory / "snapshot.json"
+        snapshot.write_text(json.dumps({"id": 999, "name": "其它活动", "description": "重要备注"}))
+        result = self.run_script("update_strava_weather.sh", ACTIVITY_ID="123", YES="1", WEATHER_DESC="天气说明",
+                                 STRAVA_SYNC_ACTIVITY_FILE=str(snapshot))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ID", result.stderr)
+        self.assertEqual(self.requests(), [])
 
     def test_reorder_still_writes_when_explicitly_enabled(self):
         self.assert_success(self.run_script("reorder_summitbag.sh", YES="1"))

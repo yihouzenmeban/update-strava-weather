@@ -94,7 +94,7 @@ def strip_weather(description, template=None):
 
 
 def reorder_summitbag(description, template=None, enabled=True):
-    """Move mountain lines after the weather ahead of it, preserving other text."""
+    """Place mountain data after handwritten prefixes and before the weather."""
     if not enabled or not description:
         return description
     spans = weather_spans(description, template)
@@ -103,18 +103,28 @@ def reorder_summitbag(description, template=None, enabled=True):
     newline = "\r\n" if "\r\n" in description else "\n"
     remaining, mountains = [], []
     offset, insertion = 0, 0
+    prefix_mountain, needs_move = False, False
     for line in description.splitlines(keepends=True):
         end = offset + len(line)
         if offset == spans[0][0]:
             insertion = len(remaining)
-        is_mountain = "summitbag.com" in line or line.lstrip().startswith(("⛰", "🏔"))
+        text = line.strip()
+        elevation = re.search(r"[（(]\s*\d[\d,.]*\s*(?:m|米)\s*[）)]", text)
+        summit_link = re.fullmatch(r"(?:🌐\s*)?(?:https?://)?(?:www\.)?summitbag\.com(?:[/?#]\S*)?", text)
+        is_mountain = bool(summit_link or (elevation and (text.startswith(("⛰", "🏔")) or "summitbag.com" in text)))
         inside_weather = any(offset < stop and end > start for start, stop in spans)
-        if offset >= spans[0][1] and is_mountain and not inside_weather:
+        if is_mountain and not inside_weather:
             mountains.append(line if line.endswith("\n") else line + newline)
+            if offset >= spans[0][1]:
+                needs_move = True
+            else:
+                prefix_mountain = True
         else:
+            if offset < spans[0][0] and text and prefix_mountain:
+                needs_move = True
             remaining.append(line)
         offset = end
-    if not mountains:
+    if not needs_move:
         return description
     result = "".join(remaining[:insertion] + mountains + remaining[insertion:]).rstrip("\r\n")
     return result + (newline if description.endswith("\n") else "")

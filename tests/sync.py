@@ -36,7 +36,6 @@ assert url.startswith("https://www.strava.com/api/v3/")
 method = args[args.index("-X") + 1] if "-X" in args else "GET"
 scenario = json.loads(Path("scenario.json").read_text())
 log = Path("requests.jsonl")
-previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 entry = {"kind": "strava", "method": method, "url": url}
 status = "200"
 parsed = urlsplit(url)
@@ -66,12 +65,7 @@ elif "/streams?" in url:
     payload = scenario.get("streams", {"latlng": {"data": [None, [39.9, 116.4]]}})
     status = str(scenario.get("streams_status", 200))
 else:
-    count = sum(entry.get("kind") == "strava" and entry.get("method") == "GET"
-                and entry["url"].endswith("/activities/" + activity_id) for entry in previous)
-    activity = details[activity_id]
-    fresh = scenario.get("fresh_by_id", {}).get(activity_id, scenario.get("fresh", activity)
-            if activity_id == str(scenario["activity"]["id"]) else activity)
-    payload = fresh if count else activity
+    payload = details[activity_id]
     status = str(scenario.get("get_status_by_id", {}).get(activity_id, 200))
 Path(args[args.index("-o") + 1]).write_text(json.dumps(payload))
 with log.open("a") as output:
@@ -123,7 +117,8 @@ class SyncFixture(unittest.TestCase):
         (self.directory / "sitecustomize.py").write_text(WEATHER_MOCK)
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "FORCE", "WEATHER_DESC", "WEATHER_DESC_FILE",
-                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG", "CLIENT_ID", "CLIENT_SECRET"):
+                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG",
+                     "STRAVA_SYNC_ACTIVITY_FILE", "STRAVA_REORDER_ONLY", "CLIENT_ID", "CLIENT_SECRET"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
                                 PYTHONPATH=str(self.directory), TMPDIR=str(self.runtime))
@@ -132,7 +127,7 @@ class SyncFixture(unittest.TestCase):
                          "start_date": start.isoformat(), "start_date_local": start.replace(tzinfo=None).isoformat() + "Z",
                          "moving_time": 1200, "start_latlng": [39.9, 116.4], "trainer": False, "sport_type": "Run"}
         sample = start.replace(minute=0).timestamp()
-        self.scenario = {"activity": self.activity, "fresh": dict(self.activity, description="原备注\nhttps://summitbag.com/example"),
+        self.scenario = {"activity": self.activity,
                          "weather": {"minutely_15": {
                              "time": [sample, sample + 900, sample + 1800],
                              "temperature_2m": [20, 26, 20], "apparent_temperature": [30, 36, 30],
@@ -160,9 +155,10 @@ class SyncFixture(unittest.TestCase):
 
 class SyncTests(SyncFixture):
     def test_missing_weather_is_written_once_and_cached_with_private_permissions(self):
+        self.activity["description"] += "\nhttps://summitbag.com/example"
         self.assert_success(self.sync())
         requests = self.requests()
-        self.assertEqual(len(requests), 5)  # list, detail, weather, fresh detail, PUT
+        self.assertEqual(len(requests), 4)  # list, detail, weather, PUT
         body = requests[-1]["body"]
         self.assertEqual(body["name"], "晨跑 🌧️🥵")
         self.assertIn("https://summitbag.com/example", body["description"])
@@ -226,8 +222,7 @@ class SyncTests(SyncFixture):
                           "Powered By www.gearaut.com"):
             with self.subTest(signature=signature):
                 block = BLOCK.replace("Powered By www.gearaut.com", signature)
-                self.scenario["activity"] = dict(self.activity, description=block)
-                self.scenario["fresh"] = dict(self.activity, description="原备注\n" + block)
+                self.scenario["activity"] = dict(self.activity, description="原备注\n" + block)
                 self.assert_success(self.sync())
                 self.clear_requests()
                 self.assert_success(self.sync("--force"))
@@ -274,25 +269,27 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync("--activity-id", "123", "--latitude", "39.9", "--longitude", "116.4"))
         self.assertFalse(any("/streams?" in entry["url"] for entry in self.requests()))
 
-    def test_weather_added_during_processing_is_preserved(self):
-        self.scenario["fresh"] = dict(self.activity, description="新备注\n" + BLOCK)
-        self.assert_success(self.sync())
-        self.assertTrue(all(entry.get("method") != "PUT" for entry in self.requests()))
-        self.assertTrue(self.state.exists())
+    def test_single_activity_uses_one_detail_read_and_keeps_handwritten_prefix(self):
+        prefix = "⛰️ 今天的手写游记\n\n第一段\n第二段\n"
+        self.scenario["activity"] = dict(self.activity, description=prefix + MOUNTAINS)
+        self.assert_success(self.sync("--activity-id", "123"))
+        requests = self.requests()
+        self.assertEqual([entry["method"] for entry in requests if entry["kind"] == "strava"], ["GET", "PUT"])
+        self.assertTrue(requests[-1]["body"]["description"].startswith(prefix + MOUNTAINS + "\n温度:"))
+        self.assertEqual(list(self.runtime.iterdir()), [])
 
     def test_existing_weather_gets_mountains_reordered_by_default_without_weather_request(self):
-        self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n\n" + MOUNTAINS)
-        self.scenario["fresh"] = dict(self.activity, name="晨跑 🌞", description="最新备注\n" + BLOCK + "\n\n" + MOUNTAINS + "\n后记")
+        self.scenario["activity"] = dict(self.activity, name="晨跑 🌞", description="手写备注\n" + BLOCK + "\n\n" + MOUNTAINS + "\n后记")
         self.assert_success(self.sync("--activity-id", "123"))
         self.assertEqual(self.requests()[-1]["body"],
-                         {"name": "晨跑 🌞", "description": "最新备注\n" + MOUNTAINS + "\n" + BLOCK + "\n\n后记"})
+                         {"description": "手写备注\n" + MOUNTAINS + "\n" + BLOCK + "\n\n后记"})
+        self.assertEqual([entry["method"] for entry in self.requests()], ["GET", "PUT"])
         self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
 
     def test_later_mountains_are_found_for_cached_activities_and_repeated_sync_does_not_write(self):
         self.write_state(activities={"123": "updated"})
         description = BLOCK + "\n" + MOUNTAINS
         self.scenario["activity"] = dict(self.activity, description=description)
-        self.scenario["fresh"] = self.scenario["activity"]
         self.assert_success(self.sync())
         reordered = self.requests()[-1]["body"]["description"]
         self.assertEqual(reordered, MOUNTAINS + "\n" + BLOCK)
@@ -305,7 +302,6 @@ class SyncTests(SyncFixture):
         config = self.directory / "strava_config.sh"
         original = config.read_text()
         self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
-        self.scenario["fresh"] = self.scenario["activity"]
         cases = (("0", {}, (), False), ("1", {"REORDER_SUMMITBAG": "0"}, (), False),
                  ("1", {}, ("--no-reorder-summitbag",), False),
                  ("0", {}, ("--reorder-summitbag",), True))
@@ -325,22 +321,21 @@ class SyncTests(SyncFixture):
 
     def test_reorder_preview_never_writes_remote_or_state(self):
         self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
-        self.scenario["fresh"] = self.scenario["activity"]
         result = self.sync("--dry-run")
         self.assert_success(result)
         self.assertIn(MOUNTAINS + "\n" + BLOCK, result.stdout)
         self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
         self.assertFalse(self.state.exists())
 
-    def test_weather_arriving_during_calculation_is_only_reordered(self):
-        self.scenario["fresh"] = dict(self.activity, name="保留最新标题 🌙", description=BLOCK + "\n" + MOUNTAINS)
-        self.assert_success(self.sync())
-        self.assertEqual(self.requests()[-1]["body"], {"name": "保留最新标题 🌙", "description": MOUNTAINS + "\n" + BLOCK})
+    def test_computed_weather_updates_only_description_if_title_is_already_correct(self):
+        self.scenario["activity"] = dict(self.activity, name="晨跑 🌧️🥵")
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertEqual(set(self.requests()[-1]["body"]), {"description"})
+        self.assertEqual(sum(entry.get("method") == "GET" for entry in self.requests()), 1)
 
     def test_reorder_failure_is_retried_for_cached_activity(self):
         self.write_state(activities={"123": "updated"})
         self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
-        self.scenario["fresh"] = self.scenario["activity"]
         self.scenario["put_status"] = 500
         self.assertNotEqual(self.sync().returncode, 0)
         self.assertEqual(json.loads(self.state.read_text())["pending"], {"123": False})
@@ -360,7 +355,6 @@ class SyncTests(SyncFixture):
         (self.directory / "custom.txt").write_text("我的天气\n气温 {t_min:.1f}～{t_max:.1f}°C")
         weather = "我的天气\n气温 -2.0～5.0°C"
         self.scenario["activity"] = dict(self.activity, start_latlng=[], description=weather + "\n" + MOUNTAINS)
-        self.scenario["fresh"] = self.scenario["activity"]
         self.assert_success(self.sync("--template", "custom.txt"))
         self.assertEqual(self.requests()[-1]["body"]["description"], MOUNTAINS + "\n" + weather)
         self.assertFalse(any(entry["kind"] == "weather" or "/streams?" in entry["url"] for entry in self.requests()))
@@ -413,6 +407,7 @@ class SyncTests(SyncFixture):
         self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
 
     def test_custom_template_is_selected_from_config_or_environment_and_cli_takes_priority(self):
+        self.activity["description"] += "\nhttps://summitbag.com/example"
         (self.directory / "custom.txt").write_text("我的天气 {emoji}\n气温 {t_min:.1f}～{t_max:.1f}°C\n风速 {w_max:.0f} km/h\n")
         config = self.directory / "strava_config.sh"
         original = config.read_text()
@@ -436,15 +431,15 @@ class SyncTests(SyncFixture):
 
     def test_force_replaces_custom_weather_and_preserves_surrounding_notes(self):
         (self.directory / "custom.txt").write_text("我的天气 {emoji}\n气温 {t_min:.1f}～{t_max:.1f}°C")
-        self.scenario["fresh"] = dict(self.activity, description="原备注\n我的天气 🌙\n气温 -2.0～5.0°C\n后记\nhttps://summitbag.com/example")
+        self.scenario["activity"] = dict(self.activity, description="原备注\n我的天气 🌙\n气温 -2.0～5.0°C\n后记\nhttps://summitbag.com/example")
         self.assert_success(self.sync("--template", "custom.txt", "--force"))
         self.assertEqual(self.requests()[-1]["body"]["description"],
                          "原备注\n后记\nhttps://summitbag.com/example\n我的天气 🌧️🥵\n气温 22.0～26.0°C")
 
-    def test_fresh_custom_weather_added_during_calculation_prevents_a_write(self):
+    def test_forced_custom_weather_with_identical_values_is_a_noop(self):
         (self.directory / "custom.txt").write_text("气温 {t_min:.1f}～{t_max:.1f}°C")
-        self.scenario["fresh"] = dict(self.activity, description="新备注\n气温 -2.0～5.0°C")
-        self.assert_success(self.sync("--template", "custom.txt"))
+        self.scenario["activity"] = dict(self.activity, name="晨跑 🌧️🥵", description="手写备注\n气温 22.0～26.0°C")
+        self.assert_success(self.sync("--template", "custom.txt", "--force"))
         self.assertTrue(any(entry["kind"] == "weather" for entry in self.requests()))
         self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
 
@@ -462,7 +457,7 @@ class SyncTests(SyncFixture):
                 self.assertFalse(self.state.exists())
 
     def test_force_does_not_append_to_an_unlocatable_domain_block(self):
-        self.scenario["fresh"] = dict(self.activity, description="原备注\n旧布局 www.gearaut.com\n后记")
+        self.scenario["activity"] = dict(self.activity, description="原备注\n旧布局 www.gearaut.com\n后记")
         result = self.sync("--force")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("无法定位", result.stderr)
@@ -508,7 +503,6 @@ class SyncTests(SyncFixture):
         activities = [dict(self.activity, id=activity_id, description=BLOCK) for activity_id in ids]
         self.scenario["activities"] = activities
         self.scenario["details"] = {str(item["id"]): item for item in activities}
-        self.scenario["fresh_by_id"] = self.scenario["details"].copy()
         return activities
 
     def write_state(self, activities=None, pending=None, last_scan=None):
@@ -647,6 +641,26 @@ class WeatherMathTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_activity_snapshot_handoff_is_private_and_cleaned_up(self):
+        module = self.load_module()
+        args = module.argparse.Namespace(dry_run=False, reorder_summitbag=True, template="templates/weather.default.txt")
+        activity = {"id": 123, "name": "晨跑", "description": "手写备注"}
+        snapshots = []
+
+        def invoke(command, activity_id=None, extra=None, arguments=()):
+            self.assertEqual(activity_id, "123")
+            path = Path(extra["STRAVA_SYNC_ACTIVITY_FILE"])
+            snapshots.append(path)
+            self.assertEqual(json.loads(path.read_text()), activity)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with patch.object(module, "invoke", side_effect=invoke):
+            module.update_activity(args, activity, description="天气说明")
+        self.assertTrue(snapshots)
+        self.assertFalse(snapshots[0].parent.exists())
 
     def test_current_and_legacy_weather_signatures_are_recognized(self):
         module = self.load_module()

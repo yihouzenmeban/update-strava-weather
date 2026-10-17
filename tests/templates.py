@@ -107,6 +107,22 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(reorder_summitbag("原备注\n" + weather + "\n" + MOUNTAINS, template),
                          "原备注\n" + MOUNTAINS + "\n" + weather)
 
+    def test_handwritten_prefix_stays_before_all_mountain_data(self):
+        prefix = "⛰️ 今天的手写游记\n第一段描述\n\n第二段描述\n"
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                source = MOUNTAINS + "\n" + prefix + DEFAULT + "\n🏔️ 山峰二 (919 m)"
+                expected = prefix + MOUNTAINS + "\n🏔️ 山峰二 (919 m)\n" + DEFAULT
+                self.assertEqual(reorder_summitbag(source.replace("\n", newline)), expected.replace("\n", newline))
+
+    def test_handwritten_mountain_emoji_note_is_not_treated_as_peak_data(self):
+        source = "手写前言\n" + DEFAULT + "\n⛰️ 今天走得很开心\n" + MOUNTAINS
+        self.assertEqual(reorder_summitbag(source), "手写前言\n" + MOUNTAINS + "\n" + DEFAULT + "\n⛰️ 今天走得很开心")
+
+    def test_correct_order_with_paragraph_spacing_is_unchanged(self):
+        source = "手写前言\n\n" + MOUNTAINS + "\n\n" + DEFAULT + "\n\n"
+        self.assertEqual(reorder_summitbag(source), source)
+
 
 if __name__ == "__main__":
     unittest.main()
