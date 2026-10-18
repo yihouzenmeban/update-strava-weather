@@ -276,17 +276,16 @@ def process_activity(args, activity_id, activities, force=False):
     return update_activity(args, activity, emoji, description)
 
 
-def enqueue(state, activity_id, force, reorder=False):
+def enqueue(state, activity_id, force):
     if activity_id in state["pending"]:
         state["pending"][activity_id] = state["pending"][activity_id] or force
-    elif force or activity_id not in state["activities"] or (
-            reorder and state["activities"][activity_id] != "indoor"):
+    elif force or activity_id not in state["activities"]:
         state["pending"][activity_id] = force
 
 
 def discover(args, state, state_path, now):
     if args.activity_id is not None:
-        enqueue(state, args.activity_id, args.force, args.reorder_summitbag)
+        enqueue(state, args.activity_id, args.force)
         if not args.dry_run and args.activity_id in state["pending"]:
             save_state(state_path, state)
         return [args.activity_id] if args.activity_id in state["pending"] else []
@@ -326,7 +325,7 @@ def discover(args, state, state_path, now):
             raise SyncError("Strava 分页未推进，扫描进度未推进，请稍后重试")
         for activity_id in ids:
             found[activity_id] = None
-            enqueue(state, activity_id, args.force, args.reorder_summitbag)
+            enqueue(state, activity_id, args.force)
         if ids and not args.dry_run:
             save_state(state_path, state)
         if len(batch) < args.page_size:
