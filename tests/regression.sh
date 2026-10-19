@@ -24,7 +24,7 @@ test_auth_does_not_require_activity_id() {
   local rc
 
   mkdir -p "$work_dir"
-  cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
+  cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$ROOT_DIR/api_usage.py" "$work_dir/"
   prepare_config "$work_dir"
 
   set +e
@@ -124,7 +124,7 @@ PY
 test_read_commands() {
   local work_dir="$TMP_DIR/read"
   mkdir -p "$work_dir/bin"
-  cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
+  cp "$ROOT_DIR/update_strava_weather.sh" "$ROOT_DIR/strava_common.sh" "$ROOT_DIR/api_usage.py" "$work_dir/"
   prepare_config "$work_dir"
   cat > "$work_dir/.strava_tokens.json" <<'EOF'
 {"access_token":"test-access-token","refresh_token":"test-refresh-token","expires_at":4102444800}
@@ -279,6 +279,7 @@ case "${1:-all}" in
   security) python3 "$ROOT_DIR/tests/security.py" ;;
   config) python3 "$ROOT_DIR/tests/config.py" ;;
   sync) python3 "$ROOT_DIR/tests/sync.py" ;;
+  api_usage) python3 "$ROOT_DIR/tests/api_usage.py" ;;
   templates) python3 "$ROOT_DIR/tests/templates.py" ;;
   webhook) python3 "$ROOT_DIR/tests/webhook.py" ;;
   all)
@@ -289,6 +290,7 @@ case "${1:-all}" in
     python3 "$ROOT_DIR/tests/templates.py"
     python3 "$ROOT_DIR/tests/security.py"
     python3 "$ROOT_DIR/tests/sync.py"
+    python3 "$ROOT_DIR/tests/api_usage.py"
     python3 "$ROOT_DIR/tests/webhook.py"
     ;;
   *) fail "unknown test: $1" ;;

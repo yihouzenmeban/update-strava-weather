@@ -11,6 +11,7 @@
 #   批量补齐新增和待重试活动的天气：./update_strava_weather.sh sync
 #   预览：./update_strava_weather.sh sync --dry-run；重算：sync --force
 #   历史补扫：sync --since YYYY-MM-DD --until YYYY-MM-DD；全部历史：sync --all
+#   查看 API 用量与预留额度：./update_strava_weather.sh api-usage
 #   1) 首次：在 config.local.json 的 strava 中填写 client_id / client_secret；
 #      确认 Strava 应用 Authorization Callback Domain = localhost；然后运行：
 #        ./update_strava_weather.sh login
@@ -330,5 +331,5 @@ case "${1:-run}" in
   list|get|streams) do_read "$1" "${2:-}" ;;
   show) DRY_RUN=1 do_update ;;
   run|"") do_update ;;
-  *) die "未知命令: $1（可用: sync / login / auth / list [数量] / get / streams / show / 不带参数直接运行）" ;;
+  api-usage) python3 "$SCRIPT_DIR/api_usage.py" status ;;
 esac

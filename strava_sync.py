@@ -22,6 +22,18 @@ from weather_template import has_weather, load_template, reorder_summitbag
 from project_config import load_config
 
 
+def usage_tracker():
+    """API 用量守卫；模块缺失时返回 None（降级为无保护运行）。"""
+    try:
+        from api_usage import UsageTracker
+    except ImportError:
+        return None
+    try:
+        return UsageTracker()
+    except (OSError, ValueError):
+        return None
+
+
 ROOT = Path(__file__).resolve().parent
 FIELDS = ("temperature_2m", "apparent_temperature", "relative_humidity_2m", "wind_speed_10m")
 VARIABLES = ",".join(FIELDS + ("weather_code",))
@@ -413,8 +425,22 @@ def main():
             state_path = ROOT / ".strava_weather_state.json"
             state = load_state(state_path)
             selected = discover(args, state, state_path, int(dt.datetime.now(dt.timezone.utc).timestamp()))
+            # 批量模式（非 webhook 的 --activity-id）受 API 配额预留保护：
+            # 启动前检查一次，处理中每条检查一次，触及预留线就停，剩余留待下轮。
+            bulk = args.activity_id is None
+            usage = usage_tracker() if bulk else None
+            if usage is not None:
+                ok, reason = usage.check_budget(bulk=True)
+                if not ok:
+                    print(f"⏸️ {reason}", file=sys.stderr)
+                    return 0
             completed, failures = 0, 0
             for activity_id in selected:
+                if usage is not None:
+                    ok, reason = usage.check_budget(bulk=True)
+                    if not ok:
+                        print(f"⏸️ {reason}", file=sys.stderr)
+                        break
                 try:
                     status = process_activity(args, activity_id, state["activities"], state["pending"][activity_id])
                 except (SyncError, OSError, ValueError) as error:

@@ -37,6 +37,16 @@
     "request_timeout_seconds": 60,
     "weather_timeout_seconds": 30
   },
+  "rate_limit": {
+    "read_15min": 200,
+    "read_daily": 2000,
+    "overall_15min": 400,
+    "overall_daily": 4000,
+    "reserve_read_15min": 50,
+    "reserve_read_daily": 200,
+    "reserve_overall_15min": 100,
+    "reserve_overall_daily": 400
+  },
   "backfill": {
     "max_rounds": 200,
     "lock_retry_seconds": 600,

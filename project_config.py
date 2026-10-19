@@ -99,7 +99,7 @@ def validate(config):
     title_template_parts(config["title"]["template"])
     limits = {("sync", "page_size"): (1, 200), ("webhook", "sync_delay_seconds"): (0, None),
               ("webhook", "listen_port"): (1, 65535), ("sync", "lookback_days"): (1, None)}
-    for section in ("http", "backfill", "reorder"):
+    for section in ("http", "backfill", "reorder", "rate_limit"):
         limits.update({(section, key): (1, None) for key in config[section]})
     limits[("strava", "oauth_timeout_seconds")] = (1, None)
     limits[("strava", "list_count")] = (1, 200)
@@ -111,6 +111,10 @@ def validate(config):
         value = config[section][key]
         if type(value) is not int or value < minimum or maximum is not None and value > maximum:
             raise ValueError(f"配置 {section}.{key} 超出有效整数范围")
+    rate = config["rate_limit"]
+    for base in ("read_15min", "read_daily", "overall_15min", "overall_daily"):
+        if rate[f"reserve_{base}"] >= rate[base]:
+            raise ValueError(f"配置 rate_limit.reserve_{base} 必须小于 {base}")
     if not config["weather"]["template"].strip():
         raise ValueError("配置 weather.template 不能为空")
     for key in ("executable", "config_file"):

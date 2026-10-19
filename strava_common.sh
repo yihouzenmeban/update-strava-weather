@@ -81,8 +81,25 @@ sys.stdout.write(urlencode({"client_id": client_id, "client_secret": secret,
 strava_curl() {
   local access="$1"
   shift
+  # 记录 API 用量：解析本次调用的方法与路径（best effort，失败不影响请求）
+  local method="GET" url="" prev=""
+  local arg
+  for arg in "$@"; do
+    if [[ "$prev" == "-X" ]]; then
+      method="$arg"
+    fi
+    if [[ "$arg" == https://www.strava.com/api/v3/* ]]; then
+      url="$arg"
+    fi
+    prev="$arg"
+  done
   printf 'Authorization: Bearer %s\n' "$access" |
     curl -q -sS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECONDS" --max-time "$HTTP_REQUEST_TIMEOUT_SECONDS" --header @- "$@"
+  local rc=$?
+  if [[ -n "$url" ]]; then
+    { python3 "$SCRIPT_DIR/api_usage.py" log "$method" "/${url#https://www.strava.com/api/v3/}" >/dev/null 2>&1; } || true
+  fi
+  return $rc
 }
 
 check_api_status() {
