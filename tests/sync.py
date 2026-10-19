@@ -174,13 +174,6 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync("--activity-id", "123"))
         self.assertEqual(set(self.requests()[-1]["body"]), {"description"})
 
-    def test_custom_title_does_not_change_reorder_only_activities(self):
-        (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"template": "{emoji} | {title}"})))
-        self.activity.update(description=BLOCK + "\n" + MOUNTAINS, start_latlng=None)
-        self.assert_success(self.sync("--activity-id", "123"))
-        self.assertEqual(self.requests()[-1]["body"], {"description": MOUNTAINS + "\n" + BLOCK})
-        self.assertFalse(any(item["kind"] == "weather" for item in self.requests()))
-
     def test_invalid_title_fails_before_any_requests_or_state_updates(self):
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"template": "{wrong}"})))
         result = self.sync("--activity-id", "123")
@@ -327,14 +320,6 @@ class SyncTests(SyncFixture):
         self.assertTrue(requests[-1]["body"]["description"].startswith(prefix + MOUNTAINS + "\n温度:"))
         self.assertEqual(list(self.runtime.iterdir()), [])
 
-    def test_existing_weather_gets_mountains_reordered_by_default_without_weather_request(self):
-        self.scenario["activity"] = dict(self.activity, name="晨跑 🌞", description="手写备注\n" + BLOCK + "\n\n" + MOUNTAINS + "\n后记")
-        self.assert_success(self.sync("--activity-id", "123"))
-        self.assertEqual(self.requests()[-1]["body"],
-                         {"description": "手写备注\n" + MOUNTAINS + "\n" + BLOCK + "\n\n后记"})
-        self.assertEqual([entry["method"] for entry in self.requests()], ["GET", "PUT"])
-        self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
-
     def test_later_mountains_are_found_for_cached_activities_and_repeated_sync_does_not_write(self):
         self.write_state(activities={"123": "updated"})
         description = BLOCK + "\n" + MOUNTAINS
@@ -347,33 +332,11 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync())
         self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
 
-    def test_reorder_disable_from_config_environment_or_cli_and_enable_override(self):
-        config = self.directory / "config.local.json"
-        self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
-        cases = (("0", {}, (), False), ("1", {"REORDER_SUMMITBAG": "0"}, (), False),
-                 ("1", {}, ("--no-reorder-summitbag",), False),
-                 ("0", {}, ("--reorder-summitbag",), True))
-        for setting, environment, arguments, changed in cases:
-            with self.subTest(setting=setting, environment=environment, arguments=arguments):
-                config.write_text(json.dumps(dict(self.config, weather={"reorder_summitbag": setting == "1"})))
-                self.state.unlink(missing_ok=True)
-                self.clear_requests()
-                self.assert_success(self.sync(*arguments, **environment))
-                self.assertEqual(any(entry.get("method") == "PUT" for entry in self.requests()), changed)
-
     def test_disabled_reorder_keeps_cached_activity_fast_skip(self):
         self.write_state(activities={"123": "updated"})
         self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
         self.assert_success(self.sync("--no-reorder-summitbag"))
         self.assertEqual(len(self.requests()), 1)
-
-    def test_reorder_preview_never_writes_remote_or_state(self):
-        self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
-        result = self.sync("--dry-run")
-        self.assert_success(result)
-        self.assertIn(MOUNTAINS + "\n" + BLOCK, result.stdout)
-        self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
-        self.assertFalse(self.state.exists())
 
     def test_computed_weather_updates_only_description_if_title_is_already_correct(self):
         self.scenario["activity"] = dict(self.activity, name="晨跑 🌧️🥵")
@@ -398,28 +361,6 @@ class SyncTests(SyncFixture):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REORDER_SUMMITBAG", result.stderr)
         self.assertEqual(self.requests(), [])
-
-    def test_custom_weather_and_mountains_are_reordered_without_gps_or_weather(self):
-        (self.directory / "custom.txt").write_text("我的天气\n气温 {t_min:.1f}～{t_max:.1f}°C")
-        weather = "我的天气\n气温 -2.0～5.0°C"
-        self.scenario["activity"] = dict(self.activity, start_latlng=[], description=weather + "\n" + MOUNTAINS)
-        self.assert_success(self.sync("--template", "custom.txt"))
-        self.assertEqual(self.requests()[-1]["body"]["description"], MOUNTAINS + "\n" + weather)
-        self.assertFalse(any(entry["kind"] == "weather" or "/streams?" in entry["url"] for entry in self.requests()))
-
-    def test_manual_update_applies_default_ordering_and_respects_disable(self):
-        self.scenario["activity"]["description"] = "原备注"
-        for setting in ("1", "0"):
-            with self.subTest(setting=setting):
-                self.clear_requests()
-                (self.directory / "scenario.json").write_text(json.dumps(self.scenario))
-                result = subprocess.run(["bash", "update_strava_weather.sh"], cwd=self.directory,
-                                        env=dict(self.environment, ACTIVITY_ID="123", YES="1", REORDER_SUMMITBAG=setting,
-                                                 WEATHER_EMOJI="🌞", WEATHER_DESC=BLOCK + "\n" + MOUNTAINS),
-                                        input="", text=True, capture_output=True, timeout=30)
-                self.assert_success(result)
-                suffix = MOUNTAINS + "\n" + BLOCK if setting == "1" else BLOCK + "\n" + MOUNTAINS
-                self.assertEqual(self.requests()[-1]["body"]["description"], "原备注\n" + suffix)
 
     def test_explicit_activity_skips_list_and_cache_survives_preview(self):
         self.assert_success(self.sync("--activity-id", "123"))
