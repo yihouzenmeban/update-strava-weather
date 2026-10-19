@@ -8,9 +8,15 @@
 
 ## 与公开 API 的差异
 
-公开 API `PUT /activities/{id}` 只接受 8 个字段
+公开 API `PUT /activities/{id}` 文档中只列出 8 个字段
 （`commute`、`trainer`、`hide_from_home`、`description`、`name`、
 `type`（已废弃）、`sport_type`、`gear_id`）。
+
+> 2026-10-19 实测：官方 `PUT /activities/{id}` 实际接受
+> `selected_polyline_style`（未在文档列出）。测试方法：对活动
+> 20629854612 先 PUT `selected_polyline_style=elevation`，
+> 网页编辑页下拉框变为"海拔"；再 PUT `selected_polyline_style=gradient`，
+> 变回"坡度"。两次均为 HTTP 200 且经网页确认生效。
 
 网页版额外支持（公开 API 没有）：
 
@@ -20,7 +26,7 @@
 | `activity[private_note]` | 仅自己可见的备注 |
 | `activity[perceived_exertion]` | 主观用力程度（滑块值） |
 | `activity[prefer_perceived_exertion]` | 用主观用力代替心率的开关 |
-| `activity[selected_polyline_style]` | 地图样式（见下表，共 15 个值） |
+| `activity[selected_polyline_style]` | 地图样式（见下表，共 15 个值）。2026-10-19 实测官方 API 也接受该字段（`PUT /activities/{id}` 传 `selected_polyline_style=<value>`），无需走网页表单 |
 | `activity[stats_visibility][*]` | 按项隐藏数据：`start_time`、`calories`、`heart_rate`、`pace`、`speed`、`power`（每项 `everyone` / `only_me`） |
 | `activity[bike_id]` / `activity[athlete_gear_id]` | 自行车 / 跑鞋（按运动类型二选一） |
 | 标签（race、workout、long_run、commute 等） | 由 React 组件提交 |
