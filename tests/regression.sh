@@ -280,6 +280,7 @@ case "${1:-all}" in
   config) python3 "$ROOT_DIR/tests/config.py" ;;
   sync) python3 "$ROOT_DIR/tests/sync.py" ;;
   api_usage) python3 "$ROOT_DIR/tests/api_usage.py" ;;
+  peaks) python3 "$ROOT_DIR/tests/peaks.py" ;;
   templates) python3 "$ROOT_DIR/tests/templates.py" ;;
   webhook) python3 "$ROOT_DIR/tests/webhook.py" ;;
   all)
@@ -291,6 +292,7 @@ case "${1:-all}" in
     python3 "$ROOT_DIR/tests/security.py"
     python3 "$ROOT_DIR/tests/sync.py"
     python3 "$ROOT_DIR/tests/api_usage.py"
+    python3 "$ROOT_DIR/tests/peaks.py"
     python3 "$ROOT_DIR/tests/webhook.py"
     ;;
   *) fail "unknown test: $1" ;;

@@ -212,7 +212,11 @@ do_update() (
 import json, sys, os
 
 sys.path.insert(0, sys.argv[3])
-from weather_template import load_template, render_title, reorder_summitbag, strip_weather
+from weather_template import load_template, render_title, strip_weather
+try:
+    from peaks import update_peak_line
+except ImportError:
+    update_peak_line = None
 
 try:
     template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
@@ -243,11 +247,13 @@ if (is_trainer or is_virtual) and os.environ.get("FORCE", "") != "1":
 
 name = act.get("name", "") or ""
 desc = act.get("description", "") or ""
+peak_line = os.environ.get("PEAK_LINE", "").strip()
 reorder_enabled = os.environ.get("REORDER_SUMMITBAG") == "1"
 reorder_only = os.environ.get("STRAVA_REORDER_ONLY") == "1"
 if reorder_only:
+    # 仅更新山峰行：清旧 summitbag 内容，山峰行放天气前；天气不动
     new_name = name
-    new_desc = reorder_summitbag(desc, template, reorder_enabled)
+    new_desc = update_peak_line(desc, peak_line) if (reorder_enabled and update_peak_line) else desc
 else:
     emoji = os.environ["WEATHER_EMOJI"].strip()
     block = os.environ["WEATHER_DESC"].strip()
@@ -264,7 +270,9 @@ else:
         new_desc = (desc_clean + "\n" + block) if desc_clean else block
     else:
         new_desc = desc_clean
-    new_desc = reorder_summitbag(new_desc, template, reorder_enabled)
+    # 山峰行放天气前（离线库匹配，替代 summitbag 排序）
+    if reorder_enabled and update_peak_line:
+        new_desc = update_peak_line(new_desc, peak_line)
 
 updates = {key: value for key, value, previous in (("name", new_name, name), ("description", new_desc, desc))
            if value != previous}

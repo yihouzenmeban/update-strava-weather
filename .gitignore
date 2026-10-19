@@ -30,3 +30,5 @@ backfill-all.log
 # webhook 本机配置（含 verify_token 与个人 hooks，敏感，按机器存放）
 webhook/receiver_config.json
 webhook/logs/
+peaks/*.sqlite
+peaks/*.zip

@@ -18,8 +18,17 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlencode
 
-from weather_template import has_weather, load_template, reorder_summitbag
+from weather_template import has_weather, load_template
 from project_config import load_config
+
+
+def peak_helpers():
+    """Lazily import peak matching; returns None trio if unavailable."""
+    try:
+        from peaks import SPORT_RULES, format_peak_line, match_peaks, update_peak_line
+    except ImportError:
+        return None
+    return SPORT_RULES, format_peak_line, match_peaks, update_peak_line
 
 
 def usage_tracker():
@@ -236,8 +245,9 @@ def weather_annotation(activity, location, template=None):
     return emoji, description
 
 
-def update_activity(args, activity, emoji="", description="", reorder_only=False):
-    extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "", "WEATHER_DESC_FILE": "",
+def update_activity(args, activity, emoji="", description="", peak_line="", reorder_only=False):
+    extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "",
+             "WEATHER_DESC_FILE": "", "PEAK_LINE": peak_line,
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
              "STRAVA_REORDER_ONLY": "1" if reorder_only else "0",
              "REORDER_SUMMITBAG": "1" if args.reorder_summitbag else "0",
@@ -255,6 +265,42 @@ def update_activity(args, activity, emoji="", description="", reorder_only=False
     return {0: "updated", 2: "indoor", 3: "existing"}[result.returncode]
 
 
+def get_track_points(activity_id):
+    """Fetch full GPS track from the streams API. Returns [(lat, lon)] or []."""
+    streams = read_strava("streams", activity_id, allow_missing=True)
+    if not isinstance(streams, dict):
+        return []
+    stream = streams.get("latlng") or {}
+    points = (stream.get("data") or []) if isinstance(stream, dict) else []
+    if not isinstance(points, list):
+        return []
+    return [tuple(point) for point in points if coordinates(point)]
+
+
+def compute_peak_line(activity_id, activity):
+    """Match peaks against the offline DB. Returns the peak line or ""."""
+    helpers = peak_helpers()
+    if helpers is None:
+        return ""
+    SPORT_RULES, format_peak_line, match_peaks, _ = helpers
+    sport_type = str(activity.get("sport_type", ""))
+    if sport_type not in SPORT_RULES:
+        return ""
+    try:
+        points = get_track_points(activity_id)
+    except (SyncError, OSError, ValueError) as error:
+        print(f"⚠️ 活动 {activity_id} 轨迹获取失败，跳过山峰匹配：{error}")
+        return ""
+    if len(points) < 2:
+        return ""
+    matched = match_peaks(points, sport_type)
+    if not matched:
+        return ""
+    line = format_peak_line(matched)
+    print(f"⛰️ 活动 {activity_id} 匹配到 {len(matched)} 座山峰")
+    return line
+
+
 def process_activity(args, activity_id, activities, force=False):
     cached = activity_id in activities
     if not force and cached and (not args.reorder_summitbag or activities[activity_id] == "indoor"):
@@ -266,11 +312,16 @@ def process_activity(args, activity_id, activities, force=False):
     if activity.get("trainer") or str(activity.get("sport_type", "")).startswith("Virtual"):
         print(f"⏭️ 活动 {activity_id} 为室内活动，跳过")
         return "indoor"
+    # 山峰匹配（离线库距离算法，替代 summitbag）；不参与的类型返回空行
+    peak_line = compute_peak_line(activity_id, activity) if args.reorder_summitbag else ""
     if not force and (cached or has_weather(activity.get("description"), args.weather_template)):
         description = activity.get("description") or ""
-        if reorder_summitbag(description, args.weather_template, args.reorder_summitbag) != description:
-            return update_activity(args, activity, reorder_only=True)
-        print(f"⏭️ 活动 {activity_id} 天气已处理，山峰无需排序")
+        # 有天气：只在山峰行前插入/更新；都有且顺序正确则不动
+        helpers = peak_helpers()
+        new_desc = helpers[3](description, peak_line) if helpers else description
+        if new_desc != description:
+            return update_activity(args, activity, peak_line=peak_line, reorder_only=True)
+        print(f"⏭️ 活动 {activity_id} 天气已处理，山峰无需更新")
         return None if cached else "existing"
     location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
     if location is None:
@@ -285,7 +336,8 @@ def process_activity(args, activity_id, activities, force=False):
     if location is None:
         raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
     emoji, description = weather_annotation(activity, location, args.weather_template)
-    return update_activity(args, activity, emoji, description)
+    # 无天气：同时写入山峰和天气（山峰行在天气前）
+    return update_activity(args, activity, emoji, description, peak_line=peak_line)
 
 
 def enqueue(state, activity_id, force):
@@ -371,9 +423,9 @@ def parse_args():
                         help="天气描述模板，优先于 WEATHER_TEMPLATE_FILE；相对路径以仓库根目录为准")
     ordering = parser.add_mutually_exclusive_group()
     ordering.add_argument("--reorder-summitbag", dest="reorder_summitbag", action="store_const", const="1",
-                          default=str(int(config["weather"]["reorder_summitbag"])), help="将山峰数据移到天气前（默认开启）")
+                          default=str(int(config["weather"]["reorder_summitbag"])), help="离线库匹配山峰并放到天气前（默认开启）")
     ordering.add_argument("--no-reorder-summitbag", dest="reorder_summitbag", action="store_const", const="0",
-                          help="关闭山峰排序，已处理活动按 ID 跳过")
+                          help="关闭山峰匹配，已处理活动按 ID 跳过")
     parser.add_argument("--latitude", type=float, help="指定单条活动的纬度")
     parser.add_argument("--longitude", type=float, help="指定单条活动的经度")
     args = parser.parse_args()
