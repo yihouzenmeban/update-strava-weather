@@ -100,7 +100,7 @@ class SyncFixture(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
         for name in ("update_strava_weather.sh", "strava_common.sh", "strava_sync.py", "weather_template.py",
-                     "project_config.py", "config.default.json"):
+                     "project_config.py", "config.default.json", "peaks.py"):
             if (ROOT / name).exists():
                 shutil.copy2(ROOT / name, self.directory)
         self.config = {"strava": {"client_id": "test-client-id", "client_secret": "test-client-secret"}}
@@ -200,10 +200,11 @@ class SyncTests(SyncFixture):
         self.activity["description"] += "\nhttps://summitbag.com/example"
         self.assert_success(self.sync())
         requests = self.requests()
-        self.assertEqual(len(requests), 4)  # list, detail, weather, PUT
+        self.assertEqual(len(requests), 5)  # list, detail, streams(山峰匹配), weather, PUT
         body = requests[-1]["body"]
         self.assertEqual(body["name"], "晨跑 🌧️🥵")
-        self.assertIn("https://summitbag.com/example", body["description"])
+        # 新逻辑：旧 summitbag 行被清除，不再保留
+        self.assertNotIn("https://summitbag.com/example", body["description"])
         self.assertIn("温度: 22.00°C - 26.00°C", body["description"])
         self.assertIn("体感温度: 32.00°C - 36.00°C", body["description"])
         self.assertIn("湿度: 70.00% - 90.00%", body["description"])
@@ -213,7 +214,8 @@ class SyncTests(SyncFixture):
         self.assertEqual(list(self.runtime.iterdir()), [])
         self.clear_requests()
         self.assert_success(self.sync())
-        self.assertEqual(len(self.requests()), 2)
+        # 新逻辑：已缓存活动不再为重排重新入队，只查列表
+        self.assertEqual(len(self.requests()), 1)
         self.assertIn("/athlete/activities?", self.requests()[0]["url"])
         self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
 
@@ -249,7 +251,8 @@ class SyncTests(SyncFixture):
                 self.assertTrue(all(entry.get("method") == "GET" for entry in self.requests()))
                 self.clear_requests()
                 self.assert_success(self.sync())
-                self.assertEqual(len(self.requests()), 1 if indoor else 2)
+                # 新逻辑：已缓存活动不再为重排/山峰更新重新入队，只查列表
+                self.assertEqual(len(self.requests()), 1)
 
     def test_dry_run_never_writes_remote_activity_or_processed_state(self):
         for arguments, environment in ((("--dry-run",), {}), ((), {"DRY_RUN": "1", "YES": "1"})):
@@ -321,13 +324,13 @@ class SyncTests(SyncFixture):
         self.assertEqual(list(self.runtime.iterdir()), [])
 
     def test_later_mountains_are_found_for_cached_activities_and_repeated_sync_does_not_write(self):
+        # 新逻辑：已缓存活动不再为山峰更新重新入队，直接跳过
         self.write_state(activities={"123": "updated"})
         description = BLOCK + "\n" + MOUNTAINS
         self.scenario["activity"] = dict(self.activity, description=description)
         self.assert_success(self.sync())
-        reordered = self.requests()[-1]["body"]["description"]
-        self.assertEqual(reordered, MOUNTAINS + "\n" + BLOCK)
-        self.scenario["activity"]["description"] = reordered
+        # 无 PUT：缓存活动跳过，不重排山峰
+        self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
         self.clear_requests()
         self.assert_success(self.sync())
         self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
@@ -345,7 +348,8 @@ class SyncTests(SyncFixture):
         self.assertEqual(sum(entry.get("method") == "GET" for entry in self.requests()), 1)
 
     def test_reorder_failure_is_retried_for_cached_activity(self):
-        self.write_state(activities={"123": "updated"})
+        # 新逻辑：山峰更新在正常处理流程中进行，失败进 pending 重试
+        # 不预缓存，让活动作为新活动处理（有天气，走山峰更新路径）
         self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
         self.scenario["put_status"] = 500
         self.assertNotEqual(self.sync().returncode, 0)
@@ -505,8 +509,10 @@ class SyncTests(SyncFixture):
         state = json.loads(self.state.read_text())
         self.assertEqual(state["version"], 2)
         self.assertEqual(state["activities"], {"123": "updated", "124": "existing", "125": "existing"})
-        details = [entry for entry in self.requests() if "/activities/" in entry["url"]]
-        self.assertEqual([entry["url"].rsplit("/", 1)[-1] for entry in details], ["123", "124", "125"])
+        details = [entry for entry in self.requests()
+                   if "/activities/" in entry["url"] and "/streams?" not in entry["url"]]
+        # 新逻辑：123 已缓存，不再拉取详情
+        self.assertEqual([entry["url"].rsplit("/", 1)[-1] for entry in details], ["124", "125"])
         pages = [parse_qs(urlsplit(entry["url"]).query) for entry in self.requests() if "/athlete/activities?" in entry["url"]]
         self.assertEqual([page["page"][0] for page in pages], ["1", "2", "3"])
         self.assertEqual(len({page["before"][0] for page in pages}), 1)
