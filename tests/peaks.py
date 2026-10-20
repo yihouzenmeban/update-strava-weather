@@ -55,17 +55,22 @@ class MatchTest(unittest.TestCase):
         self.assertNotIn("未命名", names)
         self.assertNotIn("", names)
 
-    def test_ride_does_not_participate(self):
-        pts = track_through(10.001, 20.0)
-        self.assertEqual(peaks.match_peaks(pts, "Ride", db_paths=self.db), [])
+    def test_ride_uses_300m_radius(self):
+        # ~250m 外经过：Ride(300m) 命中；~350m 外：不命中
+        near = track_through(10.001, 20.0023)  # ~252m east
+        self.assertIn("测试峰", [m[0] for m in peaks.match_peaks(near, "Ride", db_paths=self.db)])
+        far = track_through(10.001, 20.0032)  # ~351m east
+        self.assertNotIn("测试峰", [m[0] for m in peaks.match_peaks(far, "Ride", db_paths=self.db)])
 
-    def test_run_uses_50m_radius(self):
-        # 70m 外经过：TrailRun(100m) 命中，Run(50m) 不命中
+    def test_run_uses_100m_radius(self):
+        # Run 与 TrailRun/Walk 统一为 100m：~70m 外经过都命中；~150m 外都不命中
         pts = track_through(10.001, 20.0007)  # ~70m east
         trail = [m[0] for m in peaks.match_peaks(pts, "TrailRun", db_paths=self.db)]
         run = [m[0] for m in peaks.match_peaks(pts, "Run", db_paths=self.db)]
         self.assertIn("测试峰", trail)
-        self.assertNotIn("测试峰", run)
+        self.assertIn("测试峰", run)
+        far = track_through(10.001, 20.0014)  # ~154m east
+        self.assertNotIn("测试峰", [m[0] for m in peaks.match_peaks(far, "Run", db_paths=self.db)])
 
     def test_repeat_pass_counts_twice(self):
         pts = track_through(10.001, 20.0, n=200)

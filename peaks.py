@@ -4,9 +4,9 @@ Replaces the summitbag integration: peaks are identified purely by horizontal
 distance between track samples and peak coordinates, never by title guessing.
 
 Sport-type rules (enter radius / sample spacing along the track):
-  TrailRun, Hike: 100 m / 20 m (50 points per km)
-  Run, Walk:       50 m / 20 m (50 points per km)
-Other types (Ride, EBikeRide, ...) do not participate.
+  TrailRun, Hike, Run, Walk: 100 m / 20 m (50 points per km)
+  Ride:                      300 m / 20 m (50 points per km)
+Other types (EBikeRide, ...) do not participate.
 """
 
 import math
@@ -24,8 +24,9 @@ SAMPLE_SPACING_M = 20.0  # 50 points per km, for every participating sport
 SPORT_RULES = {
     "TrailRun": (100, SAMPLE_SPACING_M),
     "Hike": (100, SAMPLE_SPACING_M),
-    "Run": (50, SAMPLE_SPACING_M),
-    "Walk": (50, SAMPLE_SPACING_M),
+    "Run": (100, SAMPLE_SPACING_M),
+    "Walk": (100, SAMPLE_SPACING_M),
+    "Ride": (300, SAMPLE_SPACING_M),
 }
 EXIT_RADIUS_M = 1000
 
