@@ -1,11 +1,12 @@
 """Match Strava activity GPS tracks against an offline OSM peak database.
 
 Replaces the summitbag integration: peaks are identified purely by horizontal
-distance between track samples and peak coordinates, never by title guessing.
+distance between track points and peak coordinates, never by title guessing.
+Every track point is used (no sampling).
 
-Sport-type rules (enter radius / sample spacing along the track):
-  TrailRun, Hike, Run, Walk: 100 m / 20 m (50 points per km)
-  Ride:                      300 m / 20 m (50 points per km)
+Sport-type rules (enter radius):
+  TrailRun, Hike, Run, Walk: 100 m
+  Ride:                      300 m
 Other types (EBikeRide, ...) do not participate.
 """
 
@@ -19,14 +20,13 @@ PEAK_DIR = ROOT / "peaks"
 CHINA_DB = PEAK_DIR / "RunLogChinaPeaks.sqlite"
 GLOBAL_DB = PEAK_DIR / "RunLogGlobalPeaks.sqlite"
 
-# sport_type -> (enter_radius_m, sample_spacing_m)
-SAMPLE_SPACING_M = 20.0  # 50 points per km, for every participating sport
+# sport_type -> enter_radius_m
 SPORT_RULES = {
-    "TrailRun": (100, SAMPLE_SPACING_M),
-    "Hike": (100, SAMPLE_SPACING_M),
-    "Run": (100, SAMPLE_SPACING_M),
-    "Walk": (100, SAMPLE_SPACING_M),
-    "Ride": (300, SAMPLE_SPACING_M),
+    "TrailRun": 100,
+    "Hike": 100,
+    "Run": 100,
+    "Walk": 100,
+    "Ride": 300,
 }
 EXIT_RADIUS_M = 1000
 
@@ -54,37 +54,15 @@ def valid_point(point):
             and -90 <= point[0] <= 90 and -180 <= point[1] <= 180)
 
 
-def distance_sample(points, spacing_m):
-    """Sample the track every ~spacing_m meters of travel, keeping first/last.
-
-    Walks the polyline accumulating haversine distance; emits the first track
-    point once accumulated distance reaches spacing_m, then resets. Landing
-    points are real track points (not interpolated), so spacing is approximate.
-    """
-    if len(points) <= 2:
-        return list(points)
-    sampled = [points[0]]
-    acc, prev = 0.0, points[0]
-    for point in points[1:]:
-        acc += haversine_m(prev[0], prev[1], point[0], point[1])
-        prev = point
-        if acc >= spacing_m:
-            sampled.append(point)
-            acc = 0.0
-    if sampled[-1] != points[-1]:
-        sampled.append(points[-1])
-    return sampled
-
-
 def clean_name(name):
     name = (name or "").strip()
     return "" if name in BAD_NAMES else name
 
 
-def candidate_peaks(sparse, enter_radius_m, db_paths=None):
-    """Peaks inside the sample bounding box expanded by the enter radius."""
-    lats = [p[0] for p in sparse]
-    lons = [p[1] for p in sparse]
+def candidate_peaks(points, enter_radius_m, db_paths=None):
+    """Peaks inside the track bounding box expanded by the enter radius."""
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
     # meters -> degrees (conservative: use latitude for longitude scale)
     lat_pad = enter_radius_m / 111320.0
     lon_pad = enter_radius_m / (111320.0 * max(0.2, math.cos(math.radians(sum(lats) / len(lats)))))
@@ -111,14 +89,14 @@ def candidate_peaks(sparse, enter_radius_m, db_paths=None):
     return list(found.values())
 
 
-def count_passes(dense, peak, enter_radius_m):
-    """Enter/exit-radius state machine over the dense samples.
+def count_passes(points, peak, enter_radius_m):
+    """Enter/exit-radius state machine over the track points.
 
     First entry counts 1; only after the track reaches EXIT_RADIUS_M away
     may a re-entry count again.
     """
     count, inside = 0, False
-    for lat, lon in dense:
+    for lat, lon in points:
         dist = haversine_m(lat, lon, peak["lat"], peak["lon"])
         if not inside and dist <= enter_radius_m:
             inside = True
@@ -130,16 +108,15 @@ def count_passes(dense, peak, enter_radius_m):
 
 def match_peaks(points, sport_type, db_paths=None):
     """Return [(name, elevation_m_or_None, pass_count)] for matched peaks."""
-    rule = SPORT_RULES.get(sport_type)
-    if rule is None:
+    enter_radius_m = SPORT_RULES.get(sport_type)
+    if enter_radius_m is None:
         return []
-    enter_radius_m, spacing_m = rule
     clean = [tuple(p) for p in points if valid_point(p)]
     if len(clean) < 2:
         return []
-    # One distance-based sample set (every ~spacing_m) serves candidate
-    # search, entry confirmation, and pass counting.
-    samples = distance_sample(clean, spacing_m)
+    # Every track point serves candidate search, entry confirmation and
+    # pass counting (no sampling).
+    samples = clean
     matched = []
     for peak in candidate_peaks(samples, enter_radius_m, db_paths):
         name = clean_name(peak["name"])

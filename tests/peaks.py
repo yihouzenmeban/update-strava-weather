@@ -85,23 +85,30 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(line, "⛰️ 大阳台 (587 m) ×2 • ⛰️ 小阳台 (465 m) • ⛰️ 无名峰")
 
 
-class SamplingTest(unittest.TestCase):
-    def test_distance_sample_50_per_km(self):
-        # 10m 间隔的直线轨迹约 1km，20m 采样应得到 ~50 个点
-        pts = [(10.0 + i * 0.0001, 20.0) for i in range(101)]  # ~10.0m each
-        sampled = peaks.distance_sample(pts, 20.0)
-        self.assertTrue(45 <= len(sampled) <= 56, f"got {len(sampled)}")
-        self.assertEqual(sampled[0], pts[0])
-        self.assertEqual(sampled[-1], pts[-1])
+class AllPointsTest(unittest.TestCase):
+    """Every track point is used: a peak 99m from an unskippable middle point
+    must match even though 20m sampling would drop that point (19m from start)
+    and see it only from 100.8m away."""
 
-    def test_distance_sample_short_track(self):
-        pts = [(10.0, 20.0), (10.0001, 20.0)]  # ~11m
-        self.assertEqual(peaks.distance_sample(pts, 20.0), pts)
+    @classmethod
+    def setUpClass(cls):
+        tmp = tempfile.mkdtemp()
+        path = Path(tmp) / "near.sqlite"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE osm_peak (id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+                     "elevation_m REAL, lat REAL NOT NULL, lon REAL NOT NULL)")
+        lon_pad = 19 / (111320.0 * math.cos(math.radians(10.0)))
+        conn.execute("INSERT INTO osm_peak VALUES (?,?,?,?,?)",
+                     (1, "近点峰", 400.0, 10.0 + 99 / 111320.0, 20.0 + lon_pad))
+        conn.commit()
+        conn.close()
+        cls.db = [path]
 
-    def test_distance_sample_skips_duplicate_points(self):
-        pts = [(10.0, 20.0)] * 50 + [(10.0005, 20.0)]  # 重复点不触发采样
-        sampled = peaks.distance_sample(pts, 20.0)
-        self.assertEqual(sampled, [(10.0, 20.0), (10.0005, 20.0)])
+    def test_middle_point_within_radius_is_matched(self):
+        lon_pad = 19 / (111320.0 * math.cos(math.radians(10.0)))
+        pts = [(10.0, 20.0), (10.0, 20.0 + lon_pad), (10.0, 20.0 + 2 * lon_pad)]
+        names = [m[0] for m in peaks.match_peaks(pts, "TrailRun", db_paths=self.db)]
+        self.assertIn("近点峰", names)
 
 
 class DescriptionTest(unittest.TestCase):
