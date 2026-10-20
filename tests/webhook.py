@@ -149,54 +149,55 @@ class WebhookTests(SyncFixture):
                 payload["name"] = "晨跑 🌧️🥵"
             self.assertEqual(writes[0], payload)
         self.assertEqual(sum(entry["kind"] == "weather" for entry in requests), int(creates_weather))
-        self.assertEqual(sum(entry["kind"] == "strava" for entry in requests), 2 if writes else 1)
+        # 新逻辑请求数：GET 活动详情 + 山峰匹配的 streams（reorder 开启时）+ 有写入时 PUT
+        expected_strava = 1 + (0 if disabled else 1) + (1 if writes else 0)
+        self.assertEqual(sum(entry["kind"] == "strava" for entry in requests), expected_strava)
         self.assertFalse(any("/athlete/activities?" in entry["url"] for entry in requests))
 
-    def test_create_event_sorts_varied_existing_weather_formats(self):
+    def test_create_event_clears_stale_summitbag_line_keeping_weather(self):
+        # 旧 summitbag 行不再挪到天气前面，而是按新逻辑清掉，天气块原样保留
         for label, weather in (("用户提供的旧版格式", LEGACY), ("当前默认模板", DEFAULT),
                                ("历史幽灵署名", DEFAULT.replace("🍚", "👻")),
                                ("历史 QWeather 署名", LEGACY.replace("www.gearaut.com", "QWeather (www.qweather.com)"))):
             with self.subTest(format=label):
-                self.assert_result(weather + "\n\n" + MOUNTAINS, MOUNTAINS + "\n" + weather)
+                self.assert_result(weather + "\n\n" + MOUNTAINS, weather)
 
-    def test_create_event_handles_multiline_mountains_notes_and_crlf(self):
-        peaks = "⛰️ 馒头峪 (767 m)\n🏔️ 萝芭地北尖 (1,146 m)\n🌐 summitbag.com"
+    def test_create_event_removes_multiline_summitbag_lines_preserving_newlines(self):
         for newline in ("\n", "\r\n"):
             with self.subTest(newline=repr(newline)):
-                source = "原备注\n" + LEGACY + "\n重要后记\n" + peaks + "\n最后的备注"
-                expected = "原备注\n" + peaks + "\n" + LEGACY + "\n重要后记\n最后的备注"
+                source = "原备注\n" + LEGACY + "\n重要后记\n" + "⛰️ 馒头峪 (767 m)\n🏔️ 萝芭地北尖 (1,146 m)\n🌐 summitbag.com" + "\n最后的备注"
+                expected = "原备注\n" + LEGACY + "\n重要后记\n最后的备注"
                 self.assert_result(source.replace("\n", newline), expected.replace("\n", newline))
 
-    def test_create_event_sorts_custom_template_and_emoji_only_mountain_lines(self):
+    def test_create_event_removes_summitbag_style_lines_before_custom_weather(self):
         template = "⛰️ 跑山天气 {emoji}\n气温 {t_min:.1f}～{t_max:.1f}°C"
         weather = "⛰️ 跑山天气 🌙\n气温 -2.0～5.0°C"
         peaks = "⛰ 馒头峪 (767 m)\n🏔️ Yangtai Shan (1,276 m)"
         self.assert_result("原备注\n" + weather + "\n" + peaks,
-                           "原备注\n" + peaks + "\n" + weather, template=template)
+                           "原备注\n" + weather, template=template)
 
-    def test_create_event_keeps_correct_or_disabled_descriptions_unchanged(self):
-        for label, source, disabled in (("顺序已正确", MOUNTAINS + "\n" + DEFAULT, False),
-                                       ("没有山峰", DEFAULT + "\n普通后记", False),
-                                       ("关闭排序", DEFAULT + "\n" + MOUNTAINS, True),
-                                       ("无法定位旧天气", "旧天气 www.gearaut.com\n" + MOUNTAINS, False)):
+    def test_create_event_cleans_stale_lines_and_leaves_clean_descriptions_unchanged(self):
+        # 含旧 summitbag 行的描述会被清理（写一次）；已经干净的描述不写
+        self.assert_result(MOUNTAINS + "\n" + DEFAULT, DEFAULT)
+        for label, source, disabled in (("没有山峰", DEFAULT + "\n普通后记", False),
+                                       ("关闭排序", DEFAULT + "\n" + MOUNTAINS, True)):
             with self.subTest(format=label):
                 self.assert_result(source, source, disabled=disabled)
+        with self.subTest(format="旧天气文本里的 summitbag 行"):
+            self.assert_result("旧天气 www.gearaut.com\n" + MOUNTAINS, "旧天气 www.gearaut.com")
 
-    def test_create_event_adds_missing_weather_and_keeps_mountains_first(self):
-        for source in (MOUNTAINS, "原备注"):
+    def test_create_event_adds_missing_weather_and_drops_stale_summitbag_line(self):
+        for source, expected in ((MOUNTAINS, DEFAULT), ("原备注", "原备注\n" + DEFAULT)):
             with self.subTest(description=source):
-                self.assert_result(source, source + "\n" + DEFAULT, creates_weather=True)
+                self.assert_result(source, expected, creates_weather=True)
 
-    def test_duplicate_create_event_rechecks_cached_activity_without_duplicate_writes(self):
-        self.assert_result(LEGACY + "\n" + MOUNTAINS, MOUNTAINS + "\n" + LEGACY, cached=True)
-        body = self.requests()[-1]["body"]
-        self.scenario["activity"].update(body)
-        (self.directory / "scenario.json").write_text(json.dumps(self.scenario))
-        self.clear_requests()
+    def test_duplicate_create_event_on_cached_activity_is_skipped(self):
+        # 已处理过的活动收到重复 create 事件：不入队、不发请求、不重复写
+        self.prepare(DEFAULT, cached=True)
         self.post_event()
+        self.assertEqual(len(self.children), 1)
         self.wait_worker()
-        self.assertEqual(len(self.requests()), 1)
-        self.assertTrue(all(entry.get("method") == "GET" for entry in self.requests()))
+        self.assertEqual(self.requests(), [])
 
     def test_non_create_events_are_acknowledged_without_triggering_sync(self):
         for object_type, aspect_type in (("activity", "update"), ("activity", "delete"), ("athlete", "update")):
@@ -220,7 +221,7 @@ class WebhookTests(SyncFixture):
         self.wait_worker()
 
     def test_failed_worker_keeps_pending_activity_and_duplicate_event_retries(self):
-        self.prepare(LEGACY + "\n" + MOUNTAINS, cached=True)
+        self.prepare(LEGACY + "\n" + MOUNTAINS)
         self.scenario["put_status"] = 500
         (self.directory / "scenario.json").write_text(json.dumps(self.scenario))
         self.post_event()
@@ -231,7 +232,7 @@ class WebhookTests(SyncFixture):
         self.clear_requests()
         self.post_event()
         self.wait_worker()
-        self.assertEqual(self.requests()[-1]["body"]["description"], MOUNTAINS + "\n" + LEGACY)
+        self.assertEqual(self.requests()[-1]["body"]["description"], LEGACY)
         self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
         self.assertEqual(json.loads(self.state.read_text())["pending"], {})
 
@@ -278,9 +279,9 @@ class WebhookTests(SyncFixture):
 
     def test_handwritten_prefix_stays_first_through_webhook_and_forced_recompute(self):
         prefix = "⛰️ 今天的手写游记\n\n路线记录\n补给记录\n"
-        self.assert_result(MOUNTAINS + "\n" + prefix + LEGACY, prefix + MOUNTAINS + "\n" + LEGACY)
+        self.assert_result(MOUNTAINS + "\n" + prefix + LEGACY, prefix + LEGACY)
         self.assert_success(self.sync("--activity-id", "123", "--force"))
-        self.assertEqual(self.requests()[-1]["body"]["description"], prefix + MOUNTAINS + "\n" + DEFAULT)
+        self.assertEqual(self.requests()[-1]["body"]["description"], prefix + DEFAULT)
 
 
 if __name__ == "__main__":
