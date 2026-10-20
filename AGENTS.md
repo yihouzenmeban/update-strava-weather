@@ -3,7 +3,8 @@
 ## 项目结构与模块职责
 
 - `update_strava_weather.sh` 是命令入口，`strava_common.sh` 负责凭据与 HTTP 请求；`strava_oauth.py` 处理授权，`strava_sync.py` 负责活动发现、重试、并发锁和天气计算。
-- `weather_template.py` 处理标题、描述渲染与山峰排序；`project_config.py` 统一加载 `config.default.json` 与私有的 `config.local.json`，默认模板正文也在默认配置中。`backfill_all.sh`、`reorder_summitbag.sh` 提供维护命令。
+- `weather_template.py` 处理标题与天气块；`peaks.py` 使用 `peaks/` 的离线 SQLite 库匹配轨迹并替换山峰行；`api_usage.py` 记录本地 API 用量并为批量同步检查配额预留。
+- `project_config.py` 统一加载 `config.default.json` 与私有的 `config.local.json`，默认模板正文也在默认配置中。`backfill_all.sh` 提供历史补扫；`reorder_summitbag.sh` 是保留的旧版文本排序命令。
 - `webhook/` 包含接收器、部署脚本和 systemd 模板；`tests/` 存放隔离回归测试。个人集成通过各机器的 webhook hooks 配置接入。
 
 ## Agent 入口与技能维护
@@ -17,11 +18,15 @@
 | 实际同步 Strava 活动 | `.agents/skills/strava-weather-update/SKILL.md` | 按用户意图执行并核对脚本结果 |
 | 修改同步与重试 | `strava_sync.py`；`README.md` 的用法 | `python3 tests/sync.py` |
 | 修改共享配置 | `project_config.py`、`config.default.json`；`README.md` 的配置 | `python3 tests/config.py` |
-| 修改模板与山峰排序 | `weather_template.py`；`README.md` 的模板与排序说明 | `python3 tests/templates.py` |
+| 修改标题与天气模板 | `weather_template.py`；`README.md` 的模板说明 | `python3 tests/templates.py` |
+| 修改山峰匹配与描述合并 | `peaks.py`；`peaks/README.md` | `python3 tests/peaks.py`、`python3 tests/sync.py` |
+| 修改 API 用量与批量预留 | `api_usage.py`、`strava_common.sh`；`README.md` 的配额说明 | `python3 tests/api_usage.py` |
 | 修改 webhook | `webhook/README.md`；`webhook/receiver.py` | `python3 tests/webhook.py` |
 | 修改授权与凭据处理 | `strava_oauth.py`、`strava_common.sh`、`update_strava_weather.sh` | `python3 tests/security.py`、`bash tests/regression.sh auth` |
 
-安装、命令及用户可见行为以 `README.md` 为入口；webhook 部署与排障集中在 `webhook/README.md`。技能只维护操作决策与结果处理，内部机制以代码和测试为准。
+安装、命令及用户可见行为以 `README.md` 为入口；离线库准备与算法见 `peaks/README.md`，webhook 通用部署见 `webhook/README.md`，Muse 平台差异见 `MUSE.md`。仅在处理相应接口任务时读取 `docs/` 的历史 API 观察记录，不据此扩大活动修改范围。技能只维护操作决策与结果处理。
+
+文档以实现和测试为准。修改参数、入队规则、请求路径或错误处理时，同步检查上述对应文档；默认值只在 `config.default.json` 维护，其它文档通过链接引用，避免复制完整配置与部署步骤。
 
 ## 开发与验证命令
 
@@ -37,7 +42,7 @@ bash -n update_strava_weather.sh strava_common.sh
 git diff --check
 ```
 
-本地开发优先运行隔离测试，无需配置真实凭据。实际同步前按 `README.md` 完成配置；`./update_strava_weather.sh sync --dry-run` 会读取真实 API，但不更新活动或同步状态。
+本地开发优先运行隔离测试，无需配置真实凭据。实际同步前按 `README.md` 完成配置；`./update_strava_weather.sh sync --dry-run` 会读取真实 API，不更新活动或同步状态，但请求仍计入配额和本地用量记录。
 
 ## 代码风格与命名
 
@@ -47,7 +52,7 @@ Python 使用四空格缩进，Bash 使用两空格缩进；函数使用 `snake_
 
 测试使用 `unittest`、模拟 API、临时目录及本机 HTTP 服务，测试方法命名为 `test_<行为>`。行为变更应先补测试并确认预期失败，再实现、复跑相关测试及完整回归；当前没有数值覆盖率门槛。
 
-覆盖请求次数、失败重试、预览、幂等性及手写备注保留。每次处理只读取一次活动详情，只提交变化字段；天气前的手写备注保持在山峰与天气之前。不添加仅验证已删除代码仍不存在的测试。
+覆盖请求次数、失败重试、预览、幂等性及手写备注保留。`sync` 每次处理只读取一次活动详情，山峰匹配另需轨迹请求，只提交变化字段；天气前的手写备注保持在山峰与天气之前。不添加仅验证已删除代码仍不存在的测试。
 
 ## 提交与 PR 约定
 

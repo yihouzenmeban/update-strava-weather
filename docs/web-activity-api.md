@@ -6,14 +6,11 @@
 >（https://developers.strava.com/docs/reference/）中开放，
 > 随时可能变更。使用前请先验证。
 
-## 与公开 API 的差异
+## 网页表单字段与公开 API 覆盖范围
 
-公开 API `PUT /activities/{id}` 文档中只列出 8 个字段
-（`commute`、`trainer`、`hide_from_home`、`description`、`name`、
-`type`（已废弃）、`sport_type`、`gear_id`），
-但实测接受更多字段，见 `put-activity-api.md`。
+本页来自 2026-10-17 的编辑页结构分析，记录表单线索，不代表所有字段均做过写回验证。后续 2026-10-19 的 [官方 PUT 实测](put-activity-api.md) 已确认 `private_note` 和 `selected_polyline_style` 也可通过公开 API 写入，不能把“公开文档未列出”理解为“公开 API 不接受”。当前同步仅更新标题和描述，不使用网页接口。
 
-网页版额外支持（公开 API 没有）：
+以下为当时观察到的网页字段及功能：
 
 | 字段 | 说明 |
 |---|---|
@@ -21,18 +18,18 @@
 | `activity[private_note]` | 仅自己可见的备注 |
 | `activity[perceived_exertion]` | 主观用力程度（滑块值） |
 | `activity[prefer_perceived_exertion]` | 用主观用力代替心率的开关 |
-| `activity[selected_polyline_style]` | 地图样式（见下表，共 15 个值） |
+| `activity[selected_polyline_style]` | 地图样式（值列表见官方 PUT 实测） |
 | `activity[stats_visibility][*]` | 按项隐藏数据：`start_time`、`calories`、`heart_rate`、`pace`、`speed`、`power`（每项 `everyone` / `only_me`） |
 | `activity[bike_id]` / `activity[athlete_gear_id]` | 自行车 / 跑鞋（按运动类型二选一） |
 | 标签（race、workout、long_run、commute 等） | 由 React 组件提交 |
-| 修剪轨迹（truncate） | 公开 API 完全没有对应端点 |
+| 修剪轨迹（truncate） | 本页未记录对应的公开 API 路径 |
 
 ## 认证
 
 - **方式**：Strava 网页登录 session cookie（不是 OAuth token）。
 - **CSRF**：每次 `GET` 编辑页现抓 `authenticity_token`
   隐藏字段的值（每次渲染都不同，不可复用）。
-- 页面源码中没有 `<meta name="csrf-token">`，token 只来自表单内隐藏字段。
+- 当次页面源码未发现 `<meta name="csrf-token">`，示例分析以表单内隐藏字段为准。
 
 ## 接口一：更新活动
 
@@ -55,49 +52,30 @@ Cookie: <网页登录 session>
 | `activity[visibility]` | 否 | `everyone` / `followers_only` / `only_me` |
 | `activity[private_note]` | 否 | 私人备注 |
 | `activity[hide_from_home]` | 否 | `true` = 在首页设为静音 |
-| `activity[selected_polyline_style]` | 否 | 地图样式，见下表 |
+| `activity[selected_polyline_style]` | 否 | 地图样式，见下方链接 |
 | `activity[perceived_exertion]` | 否 | 主观用力程度 |
 | `activity[bike_id]` | 否 | 自行车 ID（骑行类） |
 | `activity[athlete_gear_id]` | 否 | 跑鞋 ID（跑步类） |
 
-### 地图样式可选值（`activity[selected_polyline_style]`）
+### 地图样式与请求构造
 
-| value | 网页显示名 |
-|---|---|
-| `activity_shorts` | 活动回放 |
-| `default` | 标准 |
-| `fatmap_satellite_3d` | 3D |
-| `winter_3d` | 冬季 3D |
-| `surface_type` | 泥土 |
-| `elevation` | 海拔 |
-| `gradient` | 坡度 |
-| `heartrate` | 心率 |
-| `pace` | 配速 |
-| `power` | 功率 |
-| `speed` | 速度 |
-| `temperature` | 温度 |
-| `time` | 时间 |
-| `heatmap` | 活动热力 |
-| `metro` | Strava Metro |
+值列表集中维护在 [官方 PUT 实测的地图样式表](put-activity-api.md#selected_polyline_style-可选值)，本页不重复复制。
 
-### 示例
+只有用户要求操作网页接口时才准备网页登录凭据；它与仓库 OAuth token 不通用。cookie 文件应放在仓库外的私有目录，权限为 `600`，不要在聊天、日志或进程参数中传递 cookie 内容。
 
-```bash
-# 1. 从浏览器复制登录 cookie 存为 cookies.txt
-# 2. 现抓 CSRF token
-TOKEN=$(curl -s -b cookies.txt \
-  https://www.strava.com/activities/123/edit \
-  | grep -o 'name="authenticity_token" value="[^"]*"' | cut -d'"' -f4)
+获取编辑页后，用 HTML 解析器读取隐藏的 `authenticity_token` 并确认非空，再用标准库 `urllib.parse.urlencode` 编码表单。将编码结果通过标准输入（`curl --data-binary @-`）或权限为 `600` 的临时文件提交；cookie 通过 `curl -b /path/to/private-cookie-file` 读取。不要把 token 展开成 `curl -d "authenticity_token=$TOKEN"`，否则会暴露到进程参数。
 
-# 3. 提交（改标题 + 地图样式为海拔）
-curl -b cookies.txt -c cookies.txt \
-  -d "_method=patch" \
-  -d "authenticity_token=$TOKEN" \
-  -d "utf8=✓" \
-  -d "activity[name]=晨间跑步 🌧️" \
-  -d "activity[selected_polyline_style]=elevation" \
-  https://www.strava.com/activities/123
+例如已获准的标题及地图样式修改包含以下表单键；这里是结构示意，不是可直接提交的有效表单：
+
+```text
+_method=patch
+utf8=✓
+authenticity_token=<当次编辑页的隐藏字段>
+activity[name]=晨间跑步 🌧️
+activity[selected_polyline_style]=elevation
 ```
+
+提交后通过独立读路径验证效果，不因 HTTP 成功就认定所有字段已生效。本页不提供创建、修剪或批量修改真实活动的自动化流程。
 
 ## 接口二：修剪轨迹（Truncate）
 
@@ -121,5 +99,4 @@ Cookie: <网页登录 session>
 1. 内部接口无版本承诺，Strava 改版可能随时失效；用前先 GET 验证。
 2. session cookie 有有效期，过期需重新登录。
 3. `authenticity_token` 每次渲染都不同，必须先 GET 后 POST，不可缓存复用。
-4. 公开 API 的限流（2000/天 read 档等）不适用于这些网页接口，
-   但频繁调用仍可能触发 Strava 的反自动化机制。
+4. 仓库的本地 API 计数不覆盖网页请求；不能据此判断网页服务的限制，也不能用网页接口绕过配额。

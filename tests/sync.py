@@ -203,7 +203,7 @@ class SyncTests(SyncFixture):
         self.assertEqual(len(requests), 5)  # list, detail, streams(山峰匹配), weather, PUT
         body = requests[-1]["body"]
         self.assertEqual(body["name"], "晨跑 🌧️🥵")
-        # 新逻辑：旧 summitbag 行被清除，不再保留
+        # 旧 summitbag 行被清除，不再保留
         self.assertNotIn("https://summitbag.com/example", body["description"])
         self.assertIn("温度: 22.00°C - 26.00°C", body["description"])
         self.assertIn("体感温度: 32.00°C - 36.00°C", body["description"])
@@ -214,7 +214,7 @@ class SyncTests(SyncFixture):
         self.assertEqual(list(self.runtime.iterdir()), [])
         self.clear_requests()
         self.assert_success(self.sync())
-        # 新逻辑：已缓存活动不再为重排重新入队，只查列表
+        # 已缓存活动不再为重排重新入队，只查列表
         self.assertEqual(len(self.requests()), 1)
         self.assertIn("/athlete/activities?", self.requests()[0]["url"])
         self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
@@ -251,7 +251,7 @@ class SyncTests(SyncFixture):
                 self.assertTrue(all(entry.get("method") == "GET" for entry in self.requests()))
                 self.clear_requests()
                 self.assert_success(self.sync())
-                # 新逻辑：已缓存活动不再为重排/山峰更新重新入队，只查列表
+                # 已缓存活动不再为重排/山峰更新重新入队，只查列表
                 self.assertEqual(len(self.requests()), 1)
 
     def test_dry_run_never_writes_remote_activity_or_processed_state(self):
@@ -325,7 +325,7 @@ class SyncTests(SyncFixture):
         self.assertIn("123", json.loads(self.state.read_text())["pending"])
         self.clear_requests()
         self.scenario.pop("streams_status", None)
-        # 新逻辑：参与山峰匹配的类型（Run、Ride 等）都会拉轨迹 streams 做匹配；
+        # 参与山峰匹配的类型（Run、Ride 等）都会拉轨迹 streams 做匹配；
         # 用不参与的 EBikeRide 隔离验证"显式坐标让天气不再需要轨迹回退"
         self.scenario["activity"] = dict(self.activity, sport_type="EBikeRide")
         self.assert_success(self.sync("--activity-id", "123", "--latitude", "39.9", "--longitude", "116.4"))
@@ -335,14 +335,14 @@ class SyncTests(SyncFixture):
         self.scenario["activity"] = dict(self.activity, description=prefix + MOUNTAINS)
         self.assert_success(self.sync("--activity-id", "123"))
         requests = self.requests()
-        # 新逻辑：详情 GET + 山峰匹配的轨迹 streams GET + 写回 PUT
+        # 详情 GET + 山峰匹配的轨迹 streams GET + 写回 PUT
         self.assertEqual([entry["method"] for entry in requests if entry["kind"] == "strava"], ["GET", "GET", "PUT"])
-        # 新逻辑：summitbag 格式的旧峰行被清掉，手写前缀保留
+        # summitbag 格式的旧峰行被清掉，手写前缀保留
         self.assertTrue(requests[-1]["body"]["description"].startswith(prefix + "温度:"))
         self.assertEqual(list(self.runtime.iterdir()), [])
 
-    def test_later_mountains_are_found_for_cached_activities_and_repeated_sync_does_not_write(self):
-        # 新逻辑：已缓存活动不再为山峰更新重新入队，直接跳过
+    def test_cached_activities_are_not_requeued_for_peak_updates(self):
+        # 已缓存活动不再为山峰更新重新入队，直接跳过
         self.write_state(activities={"123": "updated"})
         description = BLOCK + "\n" + MOUNTAINS
         self.scenario["activity"] = dict(self.activity, description=description)
@@ -363,11 +363,11 @@ class SyncTests(SyncFixture):
         self.scenario["activity"] = dict(self.activity, name="晨跑 🌧️🥵")
         self.assert_success(self.sync("--activity-id", "123"))
         self.assertEqual(set(self.requests()[-1]["body"]), {"description"})
-        # 新逻辑：详情 GET + 山峰匹配的轨迹 streams GET
+        # 详情 GET + 山峰匹配的轨迹 streams GET
         self.assertEqual(sum(entry.get("method") == "GET" for entry in self.requests()), 2)
 
-    def test_reorder_failure_is_retried_for_cached_activity(self):
-        # 新逻辑：山峰更新在正常处理流程中进行，失败进 pending 重试
+    def test_peak_update_failure_remains_pending_and_is_retried(self):
+        # 山峰更新在正常处理流程中进行，失败进 pending 重试
         # 不预缓存，让活动作为新活动处理（有天气，走山峰更新路径）
         self.scenario["activity"] = dict(self.activity, description=BLOCK + "\n" + MOUNTAINS)
         self.scenario["put_status"] = 500
@@ -530,7 +530,7 @@ class SyncTests(SyncFixture):
         self.assertEqual(state["activities"], {"123": "updated", "124": "existing", "125": "existing"})
         details = [entry for entry in self.requests()
                    if "/activities/" in entry["url"] and "/streams?" not in entry["url"]]
-        # 新逻辑：123 已缓存，不再拉取详情
+        # 123 已缓存，不再拉取详情
         self.assertEqual([entry["url"].rsplit("/", 1)[-1] for entry in details], ["124", "125"])
         pages = [parse_qs(urlsplit(entry["url"]).query) for entry in self.requests() if "/athlete/activities?" in entry["url"]]
         self.assertEqual([page["page"][0] for page in pages], ["1", "2", "3"])

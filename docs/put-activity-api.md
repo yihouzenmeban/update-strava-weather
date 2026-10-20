@@ -1,11 +1,8 @@
 # Strava 官方 PUT /activities/{id} 接口实测文档
 
-> 测试方法：2026-10-19 用官方 `POST /activities` 建手动测试活动
->（先后用过 id 20642459412、20642508982，均已删除），对其逐个字段
-> `PUT` 后再 `GET` 验证是否生效。按用户要求系统性覆盖：
-> GET 返回的全部可疑字段 + 网页编辑页的全部字段。
-> 只看文档会漏东西——实测发现文档未列出的字段也被接受（见下）。
-> 测试活动需在 App 手动删除（官方 API 没有删除接口）。
+> 历史实测记录：2026-10-19 创建手动测试活动，逐字段 PUT 后通过 GET 或网页验证；测试活动已删除。下表中的“文档是否列出”指当时的公开文档，并非当前支持承诺。手动活动的距离、用时结果不能外推为所有 GPS 活动均可修改。
+
+本页是接口研究资料；当前仓库同步只提交 `name` / `description`。阅读本页不意味着可以创建测试活动或修改其它字段，真实写入仍需处于用户授权范围。网页 session 与表单字段另见 [网页接口分析](web-activity-api.md)。
 
 ## 实测接受的字段
 
@@ -56,36 +53,29 @@
 | `stats_visibility` | `stats_visibility[pace]=only_me` | PUT 返回 `{"message":"error"}`，值无变化 |
 
 其余 GET 字段（`id`、`athlete`、`map`、`laps`、各类计数器、平均/最大配速心率等）
-为只读或计算字段，未逐个测试，默认不可写。
+未逐个测试，不能仅凭 GET 返回就推断可写。
 
 > 注意：未知字段不会报错，Strava 静默忽略。HTTP 200 不代表字段生效，
 > 必须用独立的读路径（GET 或网页）验证。
 
 ## 读写不对称
 
-- `selected_polyline_style`：写得进去（PUT 200 且网页确认生效），
-  但 `GET /activities/{id}` 返回的 70 个字段里没有它，PUT 返回的 72 个字段里也不回显。
+- `selected_polyline_style`：当时 PUT 200 且网页确认生效，
+  但该次 GET 和 PUT 响应均不回显。
   想知道当前值只能去网页编辑页看下拉框。
 - `private_note`：写得进去，GET 也能查到，是例外。
 
 ## 示例
 
+以下从仓库根目录使用 Bash 执行，需已有有效且未过期的令牌缓存；这个低层示例不自动刷新令牌。`123` 为虚构 ID，替换为明确获准修改的活动。共享请求函数把授权头经标准输入传给 curl，避免 token 出现在外部进程参数中；不要开启跟踪或输出变量。示例仅演示地图样式写入，仍须另行读取网页确认效果。
+
 ```bash
-TOKEN=<access_token>
-AID=<活动id>
-
-# 改地图样式为坡度（文档未列出但有效）
-curl -X PUT "https://www.strava.com/api/v3/activities/$AID" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d "selected_polyline_style=gradient"
-
-# 写私人备注（文档未列出但有效）
-curl -X PUT "https://www.strava.com/api/v3/activities/$AID" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d "private_note=测试备注"
-
-# 改手动活动的距离和用时（文档未列出但有效）
-curl -X PUT "https://www.strava.com/api/v3/activities/$AID" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d "distance=5000" -d "elapsed_time=900"
+set +x
+SCRIPT_DIR="$PWD"
+source "$SCRIPT_DIR/strava_common.sh"
+ACCESS=$(token_field access_token)
+AID=123
+strava_curl "$ACCESS" --fail -X PUT "https://www.strava.com/api/v3/activities/$AID" \
+  --data-urlencode "selected_polyline_style=gradient" --output /dev/null
+unset ACCESS
 ```
