@@ -3,9 +3,9 @@
 Replaces the summitbag integration: peaks are identified purely by horizontal
 distance between track samples and peak coordinates, never by title guessing.
 
-Sport-type rules (enter radius / sparse sample cap / dense sample cap):
-  TrailRun, Hike: 100 m / 180 / 1200
-  Run, Walk:       50 m / 120 / 900
+Sport-type rules (enter radius / sample spacing along the track):
+  TrailRun, Hike: 100 m / 20 m (50 points per km)
+  Run, Walk:       50 m / 20 m (50 points per km)
 Other types (Ride, EBikeRide, ...) do not participate.
 """
 
@@ -19,12 +19,13 @@ PEAK_DIR = ROOT / "peaks"
 CHINA_DB = PEAK_DIR / "RunLogChinaPeaks.sqlite"
 GLOBAL_DB = PEAK_DIR / "RunLogGlobalPeaks.sqlite"
 
-# sport_type -> (enter_radius_m, sparse_cap, dense_cap)
+# sport_type -> (enter_radius_m, sample_spacing_m)
+SAMPLE_SPACING_M = 20.0  # 50 points per km, for every participating sport
 SPORT_RULES = {
-    "TrailRun": (100, 180, 1200),
-    "Hike": (100, 180, 1200),
-    "Run": (50, 120, 900),
-    "Walk": (50, 120, 900),
+    "TrailRun": (100, SAMPLE_SPACING_M),
+    "Hike": (100, SAMPLE_SPACING_M),
+    "Run": (50, SAMPLE_SPACING_M),
+    "Walk": (50, SAMPLE_SPACING_M),
 }
 EXIT_RADIUS_M = 1000
 
@@ -52,17 +53,26 @@ def valid_point(point):
             and -90 <= point[0] <= 90 and -180 <= point[1] <= 180)
 
 
-def uniform_sample(points, cap):
-    """Uniform index sampling, keeping first and last points."""
-    n = len(points)
-    if n <= cap:
+def distance_sample(points, spacing_m):
+    """Sample the track every ~spacing_m meters of travel, keeping first/last.
+
+    Walks the polyline accumulating haversine distance; emits the first track
+    point once accumulated distance reaches spacing_m, then resets. Landing
+    points are real track points (not interpolated), so spacing is approximate.
+    """
+    if len(points) <= 2:
         return list(points)
-    if cap <= 1:
-        return [points[0]]
-    step = (n - 1) / (cap - 1)
-    indices = {0, n - 1}
-    indices.update(min(n - 1, int(round(i * step))) for i in range(cap))
-    return [points[i] for i in sorted(indices)]
+    sampled = [points[0]]
+    acc, prev = 0.0, points[0]
+    for point in points[1:]:
+        acc += haversine_m(prev[0], prev[1], point[0], point[1])
+        prev = point
+        if acc >= spacing_m:
+            sampled.append(point)
+            acc = 0.0
+    if sampled[-1] != points[-1]:
+        sampled.append(points[-1])
+    return sampled
 
 
 def clean_name(name):
@@ -122,25 +132,26 @@ def match_peaks(points, sport_type, db_paths=None):
     rule = SPORT_RULES.get(sport_type)
     if rule is None:
         return []
-    enter_radius_m, sparse_cap, dense_cap = rule
+    enter_radius_m, spacing_m = rule
     clean = [tuple(p) for p in points if valid_point(p)]
     if len(clean) < 2:
         return []
-    sparse = uniform_sample(clean, sparse_cap)
-    dense = uniform_sample(clean, dense_cap)
+    # One distance-based sample set (every ~spacing_m) serves candidate
+    # search, entry confirmation, and pass counting.
+    samples = distance_sample(clean, spacing_m)
     matched = []
-    for peak in candidate_peaks(sparse, enter_radius_m, db_paths):
+    for peak in candidate_peaks(samples, enter_radius_m, db_paths):
         name = clean_name(peak["name"])
         if not name:
             continue
-        d_min = min(haversine_m(lat, lon, peak["lat"], peak["lon"]) for lat, lon in sparse)
+        d_min = min(haversine_m(lat, lon, peak["lat"], peak["lon"]) for lat, lon in samples)
         if d_min > enter_radius_m:
             continue
-        # Dense samples must confirm at least one entry into the same radius.
+        # Samples must confirm at least one entry into the same radius.
         if not any(haversine_m(lat, lon, peak["lat"], peak["lon"]) <= enter_radius_m
-                   for lat, lon in dense):
+                   for lat, lon in samples):
             continue
-        passes = count_passes(dense, peak, enter_radius_m)
+        passes = count_passes(samples, peak, enter_radius_m)
         if passes:
             matched.append((name, peak["elevation_m"], passes))
     # Stable order: most passes first, then by name.
@@ -205,12 +216,15 @@ def update_peak_line(description, peak_line):
     # 2) Recompute weather position on the filtered text.
     spans = weather_spans(body)
     peak_with_nl = peak_line.strip() + newline
+    head = body.rstrip("\r\n")
     if not spans:
-        return body.rstrip("\r\n") + newline + peak_with_nl.rstrip("\r\n") + trailing_nl
+        # 峰行直接接在用户备注后；描述为空时不产生前导空行
+        return (head + newline + peak_with_nl.rstrip("\r\n") + trailing_nl) if head \
+            else peak_with_nl.rstrip("\r\n") + trailing_nl
 
     # 3) Insert right before the weather block.
     weather_start = spans[0][0]
     head, tail = body[:weather_start].rstrip("\r\n"), body[weather_start:]
-    text = head + newline + peak_with_nl + tail
+    text = (head + newline if head else "") + peak_with_nl + tail
     text = re.sub(r"(\r?\n){3,}", newline * 2, text)
     return text.rstrip("\r\n") + trailing_nl if not tail.endswith(("\n", "\r")) else text

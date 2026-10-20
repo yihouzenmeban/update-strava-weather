@@ -80,6 +80,25 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(line, "⛰️ 大阳台 (587 m) ×2 • ⛰️ 小阳台 (465 m) • ⛰️ 无名峰")
 
 
+class SamplingTest(unittest.TestCase):
+    def test_distance_sample_50_per_km(self):
+        # 10m 间隔的直线轨迹约 1km，20m 采样应得到 ~50 个点
+        pts = [(10.0 + i * 0.0001, 20.0) for i in range(101)]  # ~10.0m each
+        sampled = peaks.distance_sample(pts, 20.0)
+        self.assertTrue(45 <= len(sampled) <= 56, f"got {len(sampled)}")
+        self.assertEqual(sampled[0], pts[0])
+        self.assertEqual(sampled[-1], pts[-1])
+
+    def test_distance_sample_short_track(self):
+        pts = [(10.0, 20.0), (10.0001, 20.0)]  # ~11m
+        self.assertEqual(peaks.distance_sample(pts, 20.0), pts)
+
+    def test_distance_sample_skips_duplicate_points(self):
+        pts = [(10.0, 20.0)] * 50 + [(10.0005, 20.0)]  # 重复点不触发采样
+        sampled = peaks.distance_sample(pts, 20.0)
+        self.assertEqual(sampled, [(10.0, 20.0), (10.0005, 20.0)])
+
+
 class DescriptionTest(unittest.TestCase):
     WEATHER = ("温度: 10.00°C - 12.00°C\n湿度: 60.00% - 70.00%\n"
                "Not Powered By www.gearaut.com 🍚")
@@ -117,6 +136,16 @@ class DescriptionTest(unittest.TestCase):
     def test_no_weather_appends_after_notes(self):
         result = peaks.update_peak_line("只有备注", "⛰️ 测试峰 (500 m)")
         self.assertTrue(result.index("只有备注") < result.index("⛰️ 测试峰"))
+
+    def test_summitbag_at_top_leaves_no_leading_blank_line(self):
+        # 描述第一行就是 summitbag 峰行（前面没有用户备注）：清掉后峰行直接开头
+        desc = f"⛰️ 老峰 (100 m) | 🌐 summitbag.com\n{self.WEATHER}"
+        result = peaks.update_peak_line(desc, "⛰️ 新峰 (600 m)")
+        self.assertTrue(result.startswith("⛰️ 新峰 (600 m)"), repr(result[:30]))
+
+    def test_peak_line_on_empty_description_has_no_blank_line(self):
+        result = peaks.update_peak_line("", "⛰️ 新峰 (600 m)")
+        self.assertEqual(result, "⛰️ 新峰 (600 m)")
 
 
 if __name__ == "__main__":
