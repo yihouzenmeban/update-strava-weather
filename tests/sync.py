@@ -292,6 +292,19 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync())
         self.assertTrue(self.state.exists())
 
+    def test_404_activity_is_cleared_from_pending_queue(self):
+        # 活动已删除（详情 404）：记为 gone 并从待处理队列移出，同步仍算成功；
+        # 否则每轮 sync 的列表扫描都会把它重新入队，反复白耗配额
+        self.scenario["get_status_by_id"] = {"123": 404}
+        self.assert_success(self.sync())
+        state = json.loads(self.state.read_text())
+        self.assertNotIn("123", state["pending"])
+        self.assertEqual(state["activities"].get("123"), "gone")
+        # 第二轮列表扫描不再把它入队，不再请求这条活动
+        before = len(self.requests())
+        self.assert_success(self.sync())
+        self.assertFalse(any("activities/123" in entry["url"] for entry in self.requests()[before:]))
+
     def test_empty_activity_list_advances_scan_without_completed_records(self):
         self.scenario["empty"] = True
         self.assert_success(self.sync())
@@ -311,16 +324,21 @@ class SyncTests(SyncFixture):
         self.assertNotEqual(self.sync().returncode, 0)
         self.assertIn("123", json.loads(self.state.read_text())["pending"])
         self.clear_requests()
+        self.scenario.pop("streams_status", None)
+        # 新逻辑：参与山峰匹配的类型（Run、Ride 等）都会拉轨迹 streams 做匹配；
+        # 用不参与的 EBikeRide 隔离验证"显式坐标让天气不再需要轨迹回退"
+        self.scenario["activity"] = dict(self.activity, sport_type="EBikeRide")
         self.assert_success(self.sync("--activity-id", "123", "--latitude", "39.9", "--longitude", "116.4"))
         self.assertFalse(any("/streams?" in entry["url"] for entry in self.requests()))
-
     def test_single_activity_uses_one_detail_read_and_keeps_handwritten_prefix(self):
         prefix = "⛰️ 今天的手写游记\n\n第一段\n第二段\n"
         self.scenario["activity"] = dict(self.activity, description=prefix + MOUNTAINS)
         self.assert_success(self.sync("--activity-id", "123"))
         requests = self.requests()
-        self.assertEqual([entry["method"] for entry in requests if entry["kind"] == "strava"], ["GET", "PUT"])
-        self.assertTrue(requests[-1]["body"]["description"].startswith(prefix + MOUNTAINS + "\n温度:"))
+        # 新逻辑：详情 GET + 山峰匹配的轨迹 streams GET + 写回 PUT
+        self.assertEqual([entry["method"] for entry in requests if entry["kind"] == "strava"], ["GET", "GET", "PUT"])
+        # 新逻辑：summitbag 格式的旧峰行被清掉，手写前缀保留
+        self.assertTrue(requests[-1]["body"]["description"].startswith(prefix + "温度:"))
         self.assertEqual(list(self.runtime.iterdir()), [])
 
     def test_later_mountains_are_found_for_cached_activities_and_repeated_sync_does_not_write(self):
@@ -345,7 +363,8 @@ class SyncTests(SyncFixture):
         self.scenario["activity"] = dict(self.activity, name="晨跑 🌧️🥵")
         self.assert_success(self.sync("--activity-id", "123"))
         self.assertEqual(set(self.requests()[-1]["body"]), {"description"})
-        self.assertEqual(sum(entry.get("method") == "GET" for entry in self.requests()), 1)
+        # 新逻辑：详情 GET + 山峰匹配的轨迹 streams GET
+        self.assertEqual(sum(entry.get("method") == "GET" for entry in self.requests()), 2)
 
     def test_reorder_failure_is_retried_for_cached_activity(self):
         # 新逻辑：山峰更新在正常处理流程中进行，失败进 pending 重试
@@ -413,7 +432,7 @@ class SyncTests(SyncFixture):
                 environment = {"WEATHER_TEMPLATE_FILE": "missing.txt" if source == "cli" else "custom.txt"} if source != "config" else {}
                 self.assert_success(self.sync("--activity-id", "123", *arguments, **environment))
                 self.assertEqual(self.requests()[-1]["body"]["description"],
-                                 "原备注\nhttps://summitbag.com/example\n我的天气 🌧️🥵\n气温 22.0～26.0°C\n风速 9 km/h")
+                                 "原备注\n我的天气 🌧️🥵\n气温 22.0～26.0°C\n风速 9 km/h")
 
     def test_custom_weather_is_detected_from_template_even_with_different_values(self):
         (self.directory / "custom.txt").write_text("气温 {t_min:.1f}～{t_max:.1f}°C")
@@ -426,7 +445,7 @@ class SyncTests(SyncFixture):
         self.scenario["activity"] = dict(self.activity, description="原备注\n我的天气 🌙\n气温 -2.0～5.0°C\n后记\nhttps://summitbag.com/example")
         self.assert_success(self.sync("--template", "custom.txt", "--force"))
         self.assertEqual(self.requests()[-1]["body"]["description"],
-                         "原备注\n后记\nhttps://summitbag.com/example\n我的天气 🌧️🥵\n气温 22.0～26.0°C")
+                         "原备注\n后记\n我的天气 🌧️🥵\n气温 22.0～26.0°C")
 
     def test_forced_custom_weather_with_identical_values_is_a_noop(self):
         (self.directory / "custom.txt").write_text("气温 {t_min:.1f}～{t_max:.1f}°C")

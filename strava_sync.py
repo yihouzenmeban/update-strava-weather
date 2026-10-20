@@ -79,7 +79,7 @@ def load_state(path):
         raise SyncError("处理记录版本无效，请检查 .strava_weather_state.json")
     activities = data.get("activities")
     if not isinstance(activities, dict) or any(
-            not re.fullmatch(r"[1-9][0-9]*", key) or status not in ("updated", "existing", "indoor")
+            not re.fullmatch(r"[1-9][0-9]*", key) or status not in ("updated", "existing", "indoor", "gone")
             for key, status in activities.items()):
         raise SyncError("处理记录格式错误，请检查 .strava_weather_state.json")
     if data["version"] == 1:
@@ -486,7 +486,7 @@ def main():
                 if not ok:
                     print(f"⏸️ {reason}", file=sys.stderr)
                     return 0
-            completed, failures = 0, 0
+            completed, failures, cleared_404 = 0, 0, 0
             for activity_id in selected:
                 if usage is not None:
                     ok, reason = usage.check_budget(bulk=True)
@@ -496,6 +496,16 @@ def main():
                 try:
                     status = process_activity(args, activity_id, state["activities"], state["pending"][activity_id])
                 except (SyncError, OSError, ValueError) as error:
+                    if "HTTP 404" in str(error):
+                        # 活动已删除或账号无访问权限：记为 gone 并移出队列，
+                        # 否则每轮 sync 的列表扫描都会重新把它入队，反复白耗配额
+                        if not args.dry_run:
+                            state["activities"][activity_id] = "gone"
+                            state["pending"].pop(activity_id, None)
+                            save_state(state_path, state)
+                        cleared_404 += 1
+                        print(f"🗑️ 活动 {activity_id} 返回 404，已从待处理队列清除")
+                        continue
                     failures += 1
                     print(f"❌ 活动 {activity_id}: {error}", file=sys.stderr)
                     if isinstance(error, StopBatchError):
@@ -508,7 +518,11 @@ def main():
                     state["pending"].pop(activity_id)
                     save_state(state_path, state)
             verb = "预览完成" if args.dry_run else "完成"
-            print(f"→ 本轮{verb} {completed} 条，失败 {failures} 条，待处理队列 {len(state['pending'])} 条")
+            summary = f"→ 本轮{verb} {completed} 条，失败 {failures} 条"
+            if cleared_404:
+                summary += f"，404 清除 {cleared_404} 条"
+            summary += f"，待处理队列 {len(state['pending'])} 条"
+            print(summary)
             return 1 if failures else 0
     except (SyncError, OSError, ValueError) as error:
         print(f"❌ {error}", file=sys.stderr)
