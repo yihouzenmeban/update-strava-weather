@@ -117,7 +117,7 @@ class SyncFixture(unittest.TestCase):
         (self.directory / "sitecustomize.py").write_text(WEATHER_MOCK)
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "FORCE", "WEATHER_DESC", "WEATHER_DESC_FILE",
-                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG",
+                     "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG", "MAP_STYLE",
                      "STRAVA_SYNC_ACTIVITY_FILE", "STRAVA_REORDER_ONLY", "CLIENT_ID", "CLIENT_SECRET"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
@@ -172,7 +172,28 @@ class SyncTests(SyncFixture):
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"enabled": False})))
         self.activity["name"] = "晨跑 🏔️"
         self.assert_success(self.sync("--activity-id", "123"))
-        self.assertEqual(set(self.requests()[-1]["body"]), {"description"})
+        self.assertEqual(set(self.requests()[-1]["body"]), {"description", "selected_polyline_style"})
+
+    def test_map_style_follows_sport_type_on_full_update(self):
+        # 默认活动是 Run：全量写入时地图样式设为配速
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertEqual(self.requests()[-1]["body"]["selected_polyline_style"], "pace")
+        # Ride：设为功率
+        self.activity["sport_type"] = "Ride"
+        self.clear_requests()
+        self.assert_success(self.sync("--activity-id", "123", "--force"))
+        self.assertEqual(self.requests()[-1]["body"]["selected_polyline_style"], "power")
+
+    def test_map_style_absent_for_other_sports_and_when_disabled(self):
+        self.activity["sport_type"] = "Swim"
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertNotIn("selected_polyline_style", self.requests()[-1]["body"])
+        # 配置关闭后 Run 也不再设置
+        (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, map_style={"enabled": False})))
+        self.activity["sport_type"] = "Run"
+        self.clear_requests()
+        self.assert_success(self.sync("--activity-id", "123", "--force"))
+        self.assertNotIn("selected_polyline_style", self.requests()[-1]["body"])
 
     def test_invalid_title_fails_before_any_requests_or_state_updates(self):
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"template": "{wrong}"})))
@@ -362,7 +383,7 @@ class SyncTests(SyncFixture):
     def test_computed_weather_updates_only_description_if_title_is_already_correct(self):
         self.scenario["activity"] = dict(self.activity, name="晨跑 🌧️🥵")
         self.assert_success(self.sync("--activity-id", "123"))
-        self.assertEqual(set(self.requests()[-1]["body"]), {"description"})
+        self.assertEqual(set(self.requests()[-1]["body"]), {"description", "selected_polyline_style"})
         # 详情 GET + 山峰匹配的轨迹 streams GET
         self.assertEqual(sum(entry.get("method") == "GET" for entry in self.requests()), 2)
 

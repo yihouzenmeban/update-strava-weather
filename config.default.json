@@ -15,6 +15,11 @@
     "template_file": "",
     "reorder_summitbag": true
   },
+  "map_style": {
+    "enabled": true,
+    "run": "pace",
+    "ride": "power"
+  },
   "sync": {
     "page_size": 50,
     "lookback_days": 7

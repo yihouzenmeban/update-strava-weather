@@ -209,7 +209,7 @@ do_update() (
   # 2) 计算追加后的 name / description，写到 body 文件
   WEATHER_EMOJI="$WEATHER_EMOJI" WEATHER_DESC="$WEATHER_DESC" \
     python3 - "$work_dir/activity.json" "$body_file" "$SCRIPT_DIR" <<'PY'
-import json, sys, os
+import json, sys, os, re
 
 sys.path.insert(0, sys.argv[3])
 from weather_template import load_template, render_title, strip_weather
@@ -276,6 +276,13 @@ else:
 
 updates = {key: value for key, value, previous in (("name", new_name, name), ("description", new_desc, desc))
            if value != previous}
+map_style = os.environ.get("MAP_STYLE", "").strip()
+if map_style and updates:
+    # 地图样式搭全量写入一并提交；该字段读不回来，不单独为它发请求
+    if not re.fullmatch(r"[a-z0-9_]+", map_style):
+        print("❌ MAP_STYLE 格式无效", file=sys.stderr)
+        sys.exit(1)
+    updates["selected_polyline_style"] = map_style
 if not updates:
     print("⏭️ 标题和描述没有变化，不更新")
     sys.exit(0)

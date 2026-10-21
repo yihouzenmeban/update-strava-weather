@@ -147,6 +147,8 @@ class WebhookTests(SyncFixture):
             payload = {"description": expected}
             if creates_weather:
                 payload["name"] = "晨跑 🌧️🥵"
+                # 全量写入时按运动类型设置地图样式（本用例活动为 Run → 配速）
+                payload["selected_polyline_style"] = "pace"
             self.assertEqual(writes[0], payload)
         self.assertEqual(sum(entry["kind"] == "weather" for entry in requests), int(creates_weather))
         # 新逻辑请求数：GET 活动详情 + 山峰匹配的 streams（reorder 开启时）+ 有写入时 PUT

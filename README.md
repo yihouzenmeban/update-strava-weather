@@ -78,6 +78,7 @@ update-strava-weather/
 | `strava` | 应用密钥、OAuth 等待超时、列表默认数量及令牌提前刷新时间 |
 | `title` | 标题模板 `template`、标题更新开关 `enabled` |
 | `weather` | 模板正文 `template`、可选外部模板路径 `template_file`、山峰匹配开关 `reorder_summitbag`（沿用旧名称） |
+| `map_style` | 地图样式开关 `enabled`、跑步样式 `run`、骑行样式 `ride` |
 | `sync` | 分页大小、首次扫描及增量重叠天数 |
 | `webhook` | 验证令牌、同步延迟、监听地址及端口、回调路径、个人 Hooks |
 | `ngrok` | 域名、可执行文件路径、ngrok 自身配置文件路径 |
@@ -271,6 +272,10 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 默认同步跳过已处理 ID，未处理但已有天气的活动只更新山峰；更换模板后，可指定活动加 `--force` 更新天气。强制更新仅移除能定位的旧格式或当前模板天气块，保留前后备注；山峰行另按下述规则替换。若含域名但无法定位旧天气块，会报错而不追加。旧版 `reorder_summitbag.sh` 使用同一模板配置识别天气块。
 
 建议个人模板保留 `www.gearaut.com` 署名，以便改版后仍能防重复。无署名的自定义模板只能按当前结构识别：修改固定文案或换行前，请保留旧模板，必要时手动清理旧天气块后再强制更新。
+
+## 地图样式
+
+全量写入活动时，`sync` 按运动类型一并设置地图样式（`selected_polyline_style`）：跑步（`Run`、`TrailRun`）为配速 `pace`，骑行（`Ride`、`EBikeRide`）为功率 `power`，其它类型不设置。样式与标题、描述在同一次 PUT 中提交，不额外发请求；仅更新山峰行时不改样式。该字段无法通过 API 读回，同步不判断当前样式是否已经一致。配置组 `map_style` 可关闭（`enabled`）或更换 `run` / `ride` 的样式值，可选值见 [官方 PUT 实测](docs/put-activity-api.md)。
 
 ## 山峰匹配
 

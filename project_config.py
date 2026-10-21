@@ -117,6 +117,15 @@ def validate(config):
             raise ValueError(f"配置 rate_limit.reserve_{base} 必须小于 {base}")
     if not config["weather"]["template"].strip():
         raise ValueError("配置 weather.template 不能为空")
+    map_style = config["map_style"]
+    if type(map_style["enabled"]) is not bool:
+        raise ValueError("配置 map_style.enabled 必须为布尔值")
+    valid_styles = {"activity_shorts", "default", "fatmap_satellite_3d", "winter_3d", "surface_type",
+                    "elevation", "gradient", "heartrate", "pace", "power", "speed", "temperature",
+                    "time", "heatmap", "metro"}
+    for key in ("run", "ride"):
+        if map_style[key] not in valid_styles:
+            raise ValueError(f"配置 map_style.{key} 不是有效的地图样式")
     for key in ("executable", "config_file"):
         value = config["ngrok"][key]
         if not value.startswith("/") or any(char in value for char in ('\n', '\r', '\0', '"', '%')):

@@ -245,9 +245,9 @@ def weather_annotation(activity, location, template=None):
     return emoji, description
 
 
-def update_activity(args, activity, emoji="", description="", peak_line="", reorder_only=False):
+def update_activity(args, activity, emoji="", description="", peak_line="", reorder_only=False, map_style=""):
     extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "",
-             "WEATHER_DESC_FILE": "", "PEAK_LINE": peak_line,
+             "WEATHER_DESC_FILE": "", "PEAK_LINE": peak_line, "MAP_STYLE": map_style,
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
              "STRAVA_REORDER_ONLY": "1" if reorder_only else "0",
              "REORDER_SUMMITBAG": "1" if args.reorder_summitbag else "0",
@@ -301,6 +301,18 @@ def compute_peak_line(activity_id, activity):
     return line
 
 
+def map_style_for(args, sport_type):
+    """按运动类型返回要设置的地图样式；未配置或未启用时返回空字符串。"""
+    config = getattr(args, "map_style", None)
+    if not config or not config.get("enabled"):
+        return ""
+    if sport_type in ("Run", "TrailRun"):
+        return config.get("run", "")
+    if sport_type in ("Ride", "EBikeRide"):
+        return config.get("ride", "")
+    return ""
+
+
 def process_activity(args, activity_id, activities, force=False):
     cached = activity_id in activities
     if not force and cached and (not args.reorder_summitbag or activities[activity_id] == "indoor"):
@@ -336,8 +348,9 @@ def process_activity(args, activity_id, activities, force=False):
     if location is None:
         raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
     emoji, description = weather_annotation(activity, location, args.weather_template)
-    # 无天气：同时写入山峰和天气（山峰行在天气前）
-    return update_activity(args, activity, emoji, description, peak_line=peak_line)
+    # 无天气：同时写入山峰和天气（山峰行在天气前），并按运动类型设置地图样式
+    return update_activity(args, activity, emoji, description, peak_line=peak_line,
+                           map_style=map_style_for(args, str(activity.get("sport_type", ""))))
 
 
 def enqueue(state, activity_id, force):
@@ -430,6 +443,7 @@ def parse_args():
     parser.add_argument("--longitude", type=float, help="指定单条活动的经度")
     args = parser.parse_args()
     args.lookback_days = config["sync"]["lookback_days"]
+    args.map_style = config["map_style"]
     args.dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
     if args.template is not None and not args.template.strip():
         parser.error("--template 必须指定天气模板文件路径")

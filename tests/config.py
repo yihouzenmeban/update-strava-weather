@@ -56,6 +56,17 @@ class ConfigTests(unittest.TestCase):
         self.write({"title": {"enabled": False}})
         self.assertFalse(self.load()["title"]["enabled"])
 
+    def test_map_style_defaults_and_validation(self):
+        self.assertEqual(self.load()["map_style"], {"enabled": True, "run": "pace", "ride": "power"})
+        self.write({"map_style": {"run": "heartrate"}})
+        self.assertEqual(self.load()["map_style"]["run"], "heartrate")
+        self.write({"map_style": {"run": "bogus"}})
+        with self.assertRaisesRegex(ValueError, "map_style"):
+            self.load()
+        self.write({"map_style": {"enabled": "yes"}})
+        with self.assertRaisesRegex(ValueError, "map_style"):
+            self.load()
+
     def test_invalid_title_templates_are_rejected(self):
         for template in ("", "{emoji}", "{title} {title}", "{title} {emoji}{emoji}",
                          "{title.real}", "{title!r}", "{title:>10}", "{title}\n{emoji}", "{title} {unknown}", "{title"):
