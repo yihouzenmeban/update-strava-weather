@@ -308,7 +308,7 @@ Powered By www.gearaut.com
 
 ## API 用量与配额
 
-`strava_common.sh` 的数据 API 请求会尽力记录到 `.strava_api_usage.json`；GET 计入 read 和 overall，其它方法只计 overall。它是本仓库的本地估计，不是 Strava 账户的权威计数；其它应用、网页操作及旧版独立排序脚本的请求不自动计入，记录失败也不阻止请求。
+`strava_common.sh` 的数据 API 请求会尽力记录到 `.strava_api_usage.json`；每个请求同时计入 read 和 overall（2026-10-21 实测响应头结论：两组 usage 恒等，读限额打满时 PUT 同样被 429，所有调用的实际天花板为读限额）。它是本仓库的本地估计，不是 Strava 账户的权威计数；其它应用、网页操作及旧版独立排序脚本的请求不自动计入，记录失败也不阻止请求。
 
 ```bash
 python3 api_usage.py status    # 查看本地用量、预留与可用量；可能创建本地用量文件

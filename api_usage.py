@@ -4,6 +4,13 @@ Every data-API call is logged with timestamp + method. Two counters are kept:
 - daily counters, reset at Beijing 08:00 (UTC midnight)
 - 15-minute sliding window
 
+Counting model (verified 2026-10-21 against live response headers): Strava
+increments BOTH the read and the overall counters for every data-API call,
+whatever the method — x-readratelimit-usage always equals x-ratelimit-usage,
+and once the read window is exhausted even PUT requests are rejected with
+429. So every logged call counts toward both counters here too; the read
+limits (200/15min, 2000/day) are the effective ceiling for all calls.
+
 Bulk operations (backfill, batch mute, ...) must pass check_budget() before
 starting and during processing; the webhook path (--activity-id) is exempt.
 """
@@ -95,13 +102,13 @@ class UsageTracker:
 
     def log_call(self, method, endpoint=""):
         now = self._now_ts()
-        is_read = str(method).upper() == "GET"
+        # 每个调用同时计入 read 与 overall（见模块 docstring 的实测结论）。
+        # window 条目的 is_read 仅为兼容旧记量文件而保留，恒为 True。
         data, fd = self._load(now)
         try:
-            data["window"].append([now, is_read])
+            data["window"].append([now, True])
             data["overall_daily"] += 1
-            if is_read:
-                data["read_daily"] += 1
+            data["read_daily"] += 1
         finally:
             self._save(data, fd)
 

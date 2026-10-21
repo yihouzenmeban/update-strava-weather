@@ -39,12 +39,15 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(status["read_15min_used"], 1)
         self.assertEqual(status["overall_15min_used"], 1)
 
-    def test_put_counts_overall_only(self):
+    def test_put_counts_both_read_and_overall(self):
+        # 2026-10-21 实测响应头：PUT 同样计入 read（两组 usage 恒等），且读限额打满时 PUT 也被 429
         t = tracker()
         t.log_call("PUT", "/activities/123")
         status = t.get_status()
-        self.assertEqual(status["read_daily_used"], 0)
+        self.assertEqual(status["read_daily_used"], 1)
         self.assertEqual(status["overall_daily_used"], 1)
+        self.assertEqual(status["read_15min_used"], 1)
+        self.assertEqual(status["overall_15min_used"], 1)
 
     def test_daily_resets_at_utc_midnight(self):
         # 北京时间 08:00 = UTC 午夜；跨过即清零
