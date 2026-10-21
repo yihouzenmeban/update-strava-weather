@@ -17,8 +17,8 @@
   },
   "map_style": {
     "enabled": true,
-    "run": "pace",
-    "ride": "power"
+    "power": "power",
+    "no_power": "pace"
   },
   "sync": {
     "page_size": 50,

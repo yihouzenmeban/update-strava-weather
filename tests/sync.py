@@ -174,21 +174,29 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync("--activity-id", "123"))
         self.assertEqual(set(self.requests()[-1]["body"]), {"description", "selected_polyline_style"})
 
-    def test_map_style_follows_sport_type_on_full_update(self):
-        # 默认活动是 Run：全量写入时地图样式设为配速
+    def test_map_style_prefers_power_and_falls_back_to_pace(self):
+        # 默认活动是 Run 且无功率数据：用配速图
         self.assert_success(self.sync("--activity-id", "123"))
         self.assertEqual(self.requests()[-1]["body"]["selected_polyline_style"], "pace")
-        # Ride：设为功率
-        self.activity["sport_type"] = "Ride"
+        # 有功率数据（average_watts）：改用功率图
+        self.activity["average_watts"] = 180.5
         self.clear_requests()
         self.assert_success(self.sync("--activity-id", "123", "--force"))
         self.assertEqual(self.requests()[-1]["body"]["selected_polyline_style"], "power")
+        # 骑行无功率数据同样回退配速图
+        self.activity["sport_type"] = "Ride"
+        del self.activity["average_watts"]
+        self.clear_requests()
+        self.assert_success(self.sync("--activity-id", "123", "--force"))
+        self.assertEqual(self.requests()[-1]["body"]["selected_polyline_style"], "pace")
 
-    def test_map_style_absent_for_other_sports_and_when_disabled(self):
-        self.activity["sport_type"] = "Swim"
+    def test_map_style_absent_for_trail_run_and_when_disabled(self):
+        # 越野跑即使有功率数据也不动地图样式
+        self.activity["sport_type"] = "TrailRun"
+        self.activity["average_watts"] = 200.0
         self.assert_success(self.sync("--activity-id", "123"))
         self.assertNotIn("selected_polyline_style", self.requests()[-1]["body"])
-        # 配置关闭后 Run 也不再设置
+        # 配置关闭后普通跑步也不设置
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, map_style={"enabled": False})))
         self.activity["sport_type"] = "Run"
         self.clear_requests()

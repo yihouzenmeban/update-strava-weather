@@ -123,7 +123,7 @@ def validate(config):
     valid_styles = {"activity_shorts", "default", "fatmap_satellite_3d", "winter_3d", "surface_type",
                     "elevation", "gradient", "heartrate", "pace", "power", "speed", "temperature",
                     "time", "heatmap", "metro"}
-    for key in ("run", "ride"):
+    for key in ("power", "no_power"):
         if map_style[key] not in valid_styles:
             raise ValueError(f"配置 map_style.{key} 不是有效的地图样式")
     for key in ("executable", "config_file"):

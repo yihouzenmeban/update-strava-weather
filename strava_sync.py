@@ -301,16 +301,18 @@ def compute_peak_line(activity_id, activity):
     return line
 
 
-def map_style_for(args, sport_type):
-    """按运动类型返回要设置的地图样式；未配置或未启用时返回空字符串。"""
+def map_style_for(args, activity):
+    """返回要设置的地图样式：越野跑不设置；有功率数据用功率样式，否则用配速样式。"""
     config = getattr(args, "map_style", None)
     if not config or not config.get("enabled"):
         return ""
-    if sport_type in ("Run", "TrailRun"):
-        return config.get("run", "")
-    if sport_type in ("Ride", "EBikeRide"):
-        return config.get("ride", "")
-    return ""
+    if str(activity.get("sport_type", "")) == "TrailRun":
+        return ""
+    for key in ("average_watts", "weighted_average_watts"):
+        value = activity.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return config.get("power", "")
+    return config.get("no_power", "")
 
 
 def process_activity(args, activity_id, activities, force=False):
@@ -348,9 +350,9 @@ def process_activity(args, activity_id, activities, force=False):
     if location is None:
         raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
     emoji, description = weather_annotation(activity, location, args.weather_template)
-    # 无天气：同时写入山峰和天气（山峰行在天气前），并按运动类型设置地图样式
+    # 无天气：同时写入山峰和天气（山峰行在天气前），并按功率数据设置地图样式
     return update_activity(args, activity, emoji, description, peak_line=peak_line,
-                           map_style=map_style_for(args, str(activity.get("sport_type", ""))))
+                           map_style=map_style_for(args, activity))
 
 
 def enqueue(state, activity_id, force):
