@@ -112,7 +112,7 @@ def validate(config):
         if type(value) is not int or value < minimum or maximum is not None and value > maximum:
             raise ValueError(f"配置 {section}.{key} 超出有效整数范围")
     rate = config["rate_limit"]
-    for base in ("read_15min", "read_daily", "overall_15min", "overall_daily"):
+    for base in ("read_15min", "read_daily"):
         if rate[f"reserve_{base}"] >= rate[base]:
             raise ValueError(f"配置 rate_limit.reserve_{base} 必须小于 {base}")
     if not config["weather"]["template"].strip():

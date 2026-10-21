@@ -17,9 +17,7 @@ spec.loader.exec_module(api_usage)
 
 CONFIG = {
     "read_15min": 200, "read_daily": 2000,
-    "overall_15min": 400, "overall_daily": 4000,
     "reserve_read_15min": 50, "reserve_read_daily": 200,
-    "reserve_overall_15min": 100, "reserve_overall_daily": 400,
 }
 
 
@@ -30,24 +28,22 @@ def tracker(now=None):
 
 
 class UsageTest(unittest.TestCase):
-    def test_get_counts_both_read_and_overall(self):
+    def test_get_counts_read(self):
         t = tracker()
         t.log_call("GET", "/athlete/activities")
         status = t.get_status()
         self.assertEqual(status["read_daily_used"], 1)
-        self.assertEqual(status["overall_daily_used"], 1)
         self.assertEqual(status["read_15min_used"], 1)
-        self.assertEqual(status["overall_15min_used"], 1)
+        # overall 口径已删除：两组计数恒等、限额更低，永远不可能先触线
+        self.assertNotIn("overall_daily_used", status)
 
-    def test_put_counts_both_read_and_overall(self):
-        # 2026-10-21 实测响应头：PUT 同样计入 read（两组 usage 恒等），且读限额打满时 PUT 也被 429
+    def test_put_counts_read_too(self):
+        # 2026-10-21 实测响应头：PUT 同样计入 read，且读限额打满时 PUT 也被 429
         t = tracker()
         t.log_call("PUT", "/activities/123")
         status = t.get_status()
         self.assertEqual(status["read_daily_used"], 1)
-        self.assertEqual(status["overall_daily_used"], 1)
         self.assertEqual(status["read_15min_used"], 1)
-        self.assertEqual(status["overall_15min_used"], 1)
 
     def test_daily_resets_at_utc_midnight(self):
         # 北京时间 08:00 = UTC 午夜；跨过即清零

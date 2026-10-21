@@ -5,11 +5,12 @@ Every data-API call is logged with timestamp + method. Two counters are kept:
 - 15-minute sliding window
 
 Counting model (verified 2026-10-21 against live response headers): Strava
-increments BOTH the read and the overall counters for every data-API call,
+increments BOTH its read and overall counters for every data-API call,
 whatever the method — x-readratelimit-usage always equals x-ratelimit-usage,
 and once the read window is exhausted even PUT requests are rejected with
-429. So every logged call counts toward both counters here too; the read
-limits (200/15min, 2000/day) are the effective ceiling for all calls.
+429. The overall limits (400/15min, 4000/day) are therefore unreachable —
+the read limits (200/15min, 2000/day) always bind first — so only the read
+counters are tracked here.
 
 Bulk operations (backfill, batch mute, ...) must pass check_budget() before
 starting and during processing; the webhook path (--activity-id) is exempt.
@@ -48,7 +49,7 @@ class UsageTracker:
         return dt.datetime.fromtimestamp(ts, dt.timezone.utc).date().isoformat()
 
     def _empty(self, today):
-        return {"daily_date": today, "read_daily": 0, "overall_daily": 0, "window": []}
+        return {"daily_date": today, "read_daily": 0, "window": []}
 
     def _load(self, now):
         today = self._utc_date(now)
@@ -66,12 +67,12 @@ class UsageTracker:
             if not isinstance(data, dict) or data.get("daily_date") != today:
                 data = self._empty(today)
             data.setdefault("read_daily", 0)
-            data.setdefault("overall_daily", 0)
             data.setdefault("window", [])
-            # prune 15-min window: [ts, is_read]
+            data.pop("overall_daily", None)  # 旧记量文件的 overall 计数已废弃
+            # prune 15-min window; 条目为时间戳，兼容旧格式 [ts, is_read]
             cutoff = now - WINDOW_SECONDS
-            data["window"] = [e for e in data["window"]
-                              if isinstance(e, list) and len(e) == 2 and e[0] > cutoff]
+            data["window"] = [e[0] if isinstance(e, list) else e for e in data["window"]
+                              if (e[0] if isinstance(e, list) else e) > cutoff]
             return data, fd
         except OSError:
             os.close(fd)
@@ -102,12 +103,10 @@ class UsageTracker:
 
     def log_call(self, method, endpoint=""):
         now = self._now_ts()
-        # 每个调用同时计入 read 与 overall（见模块 docstring 的实测结论）。
-        # window 条目的 is_read 仅为兼容旧记量文件而保留，恒为 True。
+        # 每个调用都计入 read（见模块 docstring 的实测结论），不再区分方法
         data, fd = self._load(now)
         try:
-            data["window"].append([now, True])
-            data["overall_daily"] += 1
+            data["window"].append(now)
             data["read_daily"] += 1
         finally:
             self._save(data, fd)
@@ -116,18 +115,12 @@ class UsageTracker:
         now = self._now_ts()
         data, fd = self._load(now)
         try:
-            read_15 = sum(1 for _, r in data["window"] if r)
-            overall_15 = len(data["window"])
             cfg = self.config
             return {
-                "read_15min_used": read_15, "read_15min_limit": cfg["read_15min"],
+                "read_15min_used": len(data["window"]), "read_15min_limit": cfg["read_15min"],
                 "read_15min_reserve": cfg["reserve_read_15min"],
                 "read_daily_used": data["read_daily"], "read_daily_limit": cfg["read_daily"],
                 "read_daily_reserve": cfg["reserve_read_daily"],
-                "overall_15min_used": overall_15, "overall_15min_limit": cfg["overall_15min"],
-                "overall_15min_reserve": cfg["reserve_overall_15min"],
-                "overall_daily_used": data["overall_daily"], "overall_daily_limit": cfg["overall_daily"],
-                "overall_daily_reserve": cfg["reserve_overall_daily"],
             }
         finally:
             if fd is not None:
@@ -147,8 +140,6 @@ class UsageTracker:
         checks = [
             ("read_15min", "15分钟读取"),
             ("read_daily", "每日读取"),
-            ("overall_15min", "15分钟总计"),
-            ("overall_daily", "每日总计"),
         ]
         for key, label in checks:
             if s[f"{key}_used"] >= s[f"{key}_limit"] - s[f"{key}_reserve"]:
@@ -165,8 +156,6 @@ def format_status(status):
     return "\n".join([
         line("read    15分钟", "read_15min"),
         line("read    今天  ", "read_daily"),
-        line("overall 15分钟", "overall_15min"),
-        line("overall 今天  ", "overall_daily"),
     ])
 
 

@@ -83,7 +83,7 @@ update-strava-weather/
 | `webhook` | 验证令牌、同步延迟、监听地址及端口、回调路径、个人 Hooks |
 | `ngrok` | 域名、可执行文件路径、ngrok 自身配置文件路径 |
 | `http` | 连接、Strava 请求及天气请求超时 |
-| `rate_limit` | read / overall 的每日、15 分钟额度与批量操作预留，见下文配额说明 |
+| `rate_limit` | read 的每日、15 分钟额度与批量操作预留，见下文配额说明 |
 | `backfill` | 历史补扫轮数及重试等待参数 |
 | `reorder` | 旧版独立文本排序脚本的分页、限流及请求间隔 |
 
@@ -308,7 +308,7 @@ Powered By www.gearaut.com
 
 ## API 用量与配额
 
-`strava_common.sh` 的数据 API 请求会尽力记录到 `.strava_api_usage.json`；每个请求同时计入 read 和 overall（2026-10-21 实测响应头结论：两组 usage 恒等，读限额打满时 PUT 同样被 429，所有调用的实际天花板为读限额）。它是本仓库的本地估计，不是 Strava 账户的权威计数；其它应用、网页操作及旧版独立排序脚本的请求不自动计入，记录失败也不阻止请求。
+`strava_common.sh` 的数据 API 请求会尽力记录到 `.strava_api_usage.json`，统一计入 read（2026-10-21 实测响应头结论：Strava 的 read 与 overall 两组 usage 恒等、限额又更低，读限额打满时 PUT 同样被 429，overall 永远不可能先触线，故记量只保留 read 两档）。它是本仓库的本地估计，不是 Strava 账户的权威计数；其它应用、网页操作及旧版独立排序脚本的请求不自动计入，记录失败也不阻止请求。
 
 ```bash
 python3 api_usage.py status    # 查看本地用量、预留与可用量；可能创建本地用量文件
