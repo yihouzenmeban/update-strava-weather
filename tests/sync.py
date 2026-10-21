@@ -190,11 +190,16 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync("--activity-id", "123", "--force"))
         self.assertEqual(self.requests()[-1]["body"]["selected_polyline_style"], "pace")
 
-    def test_map_style_absent_for_trail_run_and_when_disabled(self):
+    def test_map_style_absent_for_trail_run_hike_and_when_disabled(self):
         # 越野跑即使有功率数据也不动地图样式
         self.activity["sport_type"] = "TrailRun"
         self.activity["average_watts"] = 200.0
         self.assert_success(self.sync("--activity-id", "123"))
+        self.assertNotIn("selected_polyline_style", self.requests()[-1]["body"])
+        # 徒步同越野跑一样不动地图样式
+        self.activity["sport_type"] = "Hike"
+        self.clear_requests()
+        self.assert_success(self.sync("--activity-id", "123", "--force"))
         self.assertNotIn("selected_polyline_style", self.requests()[-1]["body"])
         # 配置关闭后普通跑步也不设置
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, map_style={"enabled": False})))

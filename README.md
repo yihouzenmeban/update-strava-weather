@@ -275,7 +275,7 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 
 ## 地图样式
 
-全量写入活动时，`sync` 按活动是否有功率数据一并设置地图样式（`selected_polyline_style`）：详情含 `average_watts` / `weighted_average_watts` 时用功率样式（默认 `power`），否则用配速样式（默认 `pace`）；越野跑（`TrailRun`）不设置。样式与标题、描述在同一次 PUT 中提交，不额外发请求；仅更新山峰行时不改样式。该字段无法通过 API 读回，同步不判断当前样式是否已经一致。配置组 `map_style` 可关闭（`enabled`）或更换 `power` / `no_power` 的样式值，可选值见 [官方 PUT 实测](docs/put-activity-api.md)。
+全量写入活动时，`sync` 按活动是否有功率数据一并设置地图样式（`selected_polyline_style`）：详情含 `average_watts` / `weighted_average_watts` 时用功率样式（默认 `power`），否则用配速样式（默认 `pace`）；越野跑（`TrailRun`）和徒步（`Hike`）不设置。样式与标题、描述在同一次 PUT 中提交，不额外发请求；仅更新山峰行时不改样式。该字段无法通过 API 读回，同步不判断当前样式是否已经一致。配置组 `map_style` 可关闭（`enabled`）或更换 `power` / `no_power` 的样式值，可选值见 [官方 PUT 实测](docs/put-activity-api.md)。
 
 ## 山峰匹配
 
