@@ -118,6 +118,7 @@ class SyncFixture(unittest.TestCase):
         self.environment = os.environ.copy()
         for name in ("ACTIVITY_ID", "YES", "DRY_RUN", "FORCE", "WEATHER_DESC", "WEATHER_DESC_FILE",
                      "WEATHER_EMOJI", "WEATHER_EMOJI_FILE", "WEATHER_TEMPLATE_FILE", "REORDER_SUMMITBAG", "MAP_STYLE",
+                     "STRAVA_COMMUTE_FIX",
                      "STRAVA_SYNC_ACTIVITY_FILE", "STRAVA_REORDER_ONLY", "CLIENT_ID", "CLIENT_SECRET"):
             self.environment.pop(name, None)
         self.environment.update(PATH=f'{self.directory / "bin"}:{os.environ["PATH"]}',
@@ -208,6 +209,67 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync("--activity-id", "123", "--force"))
         self.assertNotIn("selected_polyline_style", self.requests()[-1]["body"])
 
+    def test_gearaut_weather_with_power_gets_power_style_only(self):
+        # gearaut 天气在场时不查天气、不动描述；有功率数据只下发功率样式
+        self.scenario["activity"] = dict(self.activity, description=BLOCK, average_watts=210.0)
+        self.assert_success(self.sync("--activity-id", "123"))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["body"], {"selected_polyline_style": "power"})
+        self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
+        self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "updated"})
+
+    def test_gearaut_weather_trail_run_left_untouched(self):
+        # 越野跑不设样式、无山峰可加时，gearaut 天气活动完全不动
+        self.scenario["activity"] = dict(self.activity, sport_type="TrailRun",
+                                          description=BLOCK, average_watts=200.0)
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
+        self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "existing"})
+
+    def test_short_ride_commute_fix_shares_one_put(self):
+        # ≤10km 非通勤骑行：通勤+静音与地图样式同一次 PUT；可见性记入待处理清单
+        self.scenario["activity"] = dict(self.activity, sport_type="Ride", distance=8000.0,
+                                          commute=False, description=BLOCK)
+        self.assert_success(self.sync("--activity-id", "123"))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["body"], {"selected_polyline_style": "pace",
+                                           "commute": True, "hide_from_home": True})
+        pending = json.loads((self.directory / ".strava_visibility_pending.json").read_text())
+        self.assertEqual(pending, ["123"])
+
+    def test_short_ride_without_weather_gets_everything_in_one_put(self):
+        # 无天气的短骑行：天气块、样式、通勤、静音仍只发一次 PUT
+        self.scenario["activity"] = dict(self.activity, sport_type="Ride", distance=8000.0,
+                                          commute=False)
+        self.assert_success(self.sync("--activity-id", "123"))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        body = puts[0]["body"]
+        self.assertIn("温度:", body["description"])
+        self.assertEqual(body["selected_polyline_style"], "pace")
+        self.assertEqual(body["commute"], True)
+        self.assertEqual(body["hide_from_home"], True)
+
+    def test_long_ride_is_not_commute_fixed(self):
+        self.scenario["activity"] = dict(self.activity, sport_type="Ride", distance=15000.0,
+                                          commute=False, description=BLOCK)
+        self.assert_success(self.sync("--activity-id", "123"))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["body"], {"selected_polyline_style": "pace"})
+        self.assertFalse((self.directory / ".strava_visibility_pending.json").exists())
+
+    def test_already_commute_short_ride_is_not_refixed(self):
+        self.scenario["activity"] = dict(self.activity, sport_type="Ride", distance=5000.0,
+                                          commute=True, description=BLOCK)
+        self.assert_success(self.sync("--activity-id", "123"))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["body"], {"selected_polyline_style": "pace"})
+        self.assertFalse((self.directory / ".strava_visibility_pending.json").exists())
+
     def test_invalid_title_fails_before_any_requests_or_state_updates(self):
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"template": "{wrong}"})))
         result = self.sync("--activity-id", "123")
@@ -268,12 +330,16 @@ class SyncTests(SyncFixture):
         self.assertIn("温度: 20.00°C - 20.00°C  体感温度: 30.00°C - 30.00°C", description)
         self.assertTrue(description.endswith("Not Powered By www.gearaut.com 🍚"))
 
-    def test_current_weather_signature_is_skipped_without_weather_requests(self):
+    def test_own_weather_signature_skips_weather_but_still_applies_map_style(self):
+        # 已有我方天气时不查天气，但地图样式仍按流水线在一次 PUT 里下发
         self.scenario["activity"]["description"] = BLOCK.replace(
             "Powered By www.gearaut.com", "Not Powered By www.gearaut.com 🍚")
         self.assert_success(self.sync())
-        self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "existing"})
-        self.assertTrue(all(entry["kind"] == "strava" and entry["method"] == "GET" for entry in self.requests()))
+        self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "updated"})
+        self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["body"], {"selected_polyline_style": "pace"})
 
     def test_existing_weather_and_indoor_activities_are_remembered(self):
         for indoor in (False, True):
@@ -282,7 +348,12 @@ class SyncTests(SyncFixture):
                 self.clear_requests()
                 self.scenario["activity"] = dict(self.activity, trainer=indoor, description="原备注\n" + BLOCK)
                 self.assert_success(self.sync())
-                self.assertTrue(all(entry.get("method") == "GET" for entry in self.requests()))
+                if indoor:
+                    self.assertTrue(all(entry.get("method") == "GET" for entry in self.requests()))
+                else:
+                    # 有天气只跳过天气步；地图样式仍在一次 PUT 里下发
+                    puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+                    self.assertEqual([put["body"] for put in puts], [{"selected_polyline_style": "pace"}])
                 self.clear_requests()
                 self.assert_success(self.sync())
                 # 已缓存活动不再为重排/山峰更新重新入队，只查列表
@@ -447,10 +518,14 @@ class SyncTests(SyncFixture):
         self.assertIn("login", result.stderr)
         self.assertEqual(self.requests(), [])
 
-    def test_domain_signature_is_sufficient_to_skip_existing_weather(self):
+    def test_domain_signature_skips_weather_but_still_applies_map_style(self):
+        # gearaut 已写天气：我方兜底不查天气、不改描述；地图样式仍走我方逻辑
         self.scenario["activity"] = dict(self.activity, description="温度: 20°C\nPowered By www.gearaut.com")
         self.assert_success(self.sync())
-        self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
+        self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["body"], {"selected_polyline_style": "pace"})
 
     def test_custom_template_is_selected_from_config_or_environment_and_cli_takes_priority(self):
         self.activity["description"] += "\nhttps://summitbag.com/example"
@@ -472,7 +547,10 @@ class SyncTests(SyncFixture):
         (self.directory / "custom.txt").write_text("气温 {t_min:.1f}～{t_max:.1f}°C")
         self.scenario["activity"] = dict(self.activity, description="原备注\n气温 -2.0～5.0°C\n后记")
         self.assert_success(self.sync("--template", "custom.txt"))
-        self.assertFalse(any(entry["kind"] == "weather" or entry.get("method") == "PUT" for entry in self.requests()))
+        # 自定义模板天气被识别：不查天气；地图样式仍在一次 PUT 里下发
+        self.assertFalse(any(entry["kind"] == "weather" for entry in self.requests()))
+        puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
+        self.assertEqual([put["body"] for put in puts], [{"selected_polyline_style": "pace"}])
 
     def test_force_replaces_custom_weather_and_preserves_surrounding_notes(self):
         (self.directory / "custom.txt").write_text("我的天气 {emoji}\n气温 {t_min:.1f}～{t_max:.1f}°C")
@@ -561,9 +639,9 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync("--page-size", "2"))
         state = json.loads(self.state.read_text())
         self.assertEqual(state["version"], 2)
-        self.assertEqual(state["activities"], {"123": "updated", "124": "existing", "125": "existing"})
+        self.assertEqual(state["activities"], {"123": "updated", "124": "updated", "125": "updated"})
         details = [entry for entry in self.requests()
-                   if "/activities/" in entry["url"] and "/streams?" not in entry["url"]]
+                   if entry["method"] == "GET" and "/activities/" in entry["url"] and "/streams?" not in entry["url"]]
         # 123 已缓存，不再拉取详情
         self.assertEqual([entry["url"].rsplit("/", 1)[-1] for entry in details], ["124", "125"])
         pages = [parse_qs(urlsplit(entry["url"]).query) for entry in self.requests() if "/athlete/activities?" in entry["url"]]

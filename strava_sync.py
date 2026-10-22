@@ -245,9 +245,11 @@ def weather_annotation(activity, location, template=None):
     return emoji, description
 
 
-def update_activity(args, activity, emoji="", description="", peak_line="", reorder_only=False, map_style=""):
+def update_activity(args, activity, emoji="", description="", peak_line="", reorder_only=False,
+                    map_style="", commute_fix=False):
     extra = {"WEATHER_EMOJI": emoji, "WEATHER_DESC": description, "WEATHER_EMOJI_FILE": "",
              "WEATHER_DESC_FILE": "", "PEAK_LINE": peak_line, "MAP_STYLE": map_style,
+             "STRAVA_COMMUTE_FIX": "1" if commute_fix else "0",
              "YES": "1", "DRY_RUN": "1" if args.dry_run else "0",
              "STRAVA_REORDER_ONLY": "1" if reorder_only else "0",
              "REORDER_SUMMITBAG": "1" if args.reorder_summitbag else "0",
@@ -315,6 +317,23 @@ def map_style_for(args, activity):
     return config.get("no_power", "")
 
 
+def record_visibility_pending(activity_id):
+    """通勤步的可见性改不了（API 不支持），记入待处理清单，攒批后走网页改「只有你」。"""
+    path = ROOT / ".strava_visibility_pending.json"
+    try:
+        ids = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(ids, list):
+            ids = []
+    except (OSError, ValueError):
+        ids = []
+    if activity_id not in ids:
+        ids.append(activity_id)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(ids), encoding="utf-8")
+        os.replace(temporary, path)
+    print(f"👁️ 活动 {activity_id} 已记入可见性待处理清单（API 改不了，需网页改「只有你」）")
+
+
 def process_activity(args, activity_id, activities, force=False):
     cached = activity_id in activities
     if not force and cached and (not args.reorder_summitbag or activities[activity_id] == "indoor"):
@@ -328,31 +347,39 @@ def process_activity(args, activity_id, activities, force=False):
         return "indoor"
     # 山峰匹配（离线库距离算法，替代 summitbag）；不参与的类型返回空行
     peak_line = compute_peak_line(activity_id, activity) if args.reorder_summitbag else ""
-    if not force and (cached or has_weather(activity.get("description"), args.weather_template)):
-        description = activity.get("description") or ""
-        # 有天气：只在山峰行前插入/更新；都有且顺序正确则不动
-        helpers = peak_helpers()
-        new_desc = helpers[3](description, peak_line) if helpers else description
-        if new_desc != description:
-            return update_activity(args, activity, peak_line=peak_line, reorder_only=True)
-        print(f"⏭️ 活动 {activity_id} 天气已处理，山峰无需更新")
-        return None if cached else "existing"
-    location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
-    if location is None:
-        streams = read_strava("streams", activity_id, allow_missing=True)
-        if not isinstance(streams, dict):
-            raise SyncError("Strava 坐标流格式无效")
-        stream = streams.get("latlng") or {}
-        points = (stream.get("data") or []) if isinstance(stream, dict) else []
-        if not isinstance(points, list):
-            raise SyncError("Strava 坐标流格式无效")
-        location = next((coordinates(point) for point in points if coordinates(point)), None)
-    if location is None:
-        raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
-    emoji, description = weather_annotation(activity, location, args.weather_template)
-    # 无天气：同时写入山峰和天气（山峰行在天气前），并按功率数据设置地图样式
-    return update_activity(args, activity, emoji, description, peak_line=peak_line,
-                           map_style=map_style_for(args, activity))
+    # 通勤步：≤10km 的非通勤骑行攒通勤+静音改动（VirtualRide 在上方按室内跳过，不到这里）
+    commute_fix = (str(activity.get("sport_type", "")) in ("Ride", "EBikeRide")
+                   and (activity.get("distance") or 0) <= 10000
+                   and not activity.get("commute"))
+    map_style = map_style_for(args, activity)
+    if not force and has_weather(activity.get("description"), args.weather_template):
+        # 天气已由 gearaut 或我方写好（我方是兜底）：天气步跳过，
+        # 山峰/地图/通勤的改动攒成一次 PUT；无改动时脚本返回 existing
+        status = update_activity(args, activity, peak_line=peak_line, reorder_only=True,
+                                 map_style=map_style, commute_fix=commute_fix)
+        if status == "existing":
+            print(f"⏭️ 活动 {activity_id} 天气已处理，无其它待改项")
+            return None if cached else "existing"
+    else:
+        location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
+        if location is None:
+            streams = read_strava("streams", activity_id, allow_missing=True)
+            if not isinstance(streams, dict):
+                raise SyncError("Strava 坐标流格式无效")
+            stream = streams.get("latlng") or {}
+            points = (stream.get("data") or []) if isinstance(stream, dict) else []
+            if not isinstance(points, list):
+                raise SyncError("Strava 坐标流格式无效")
+            location = next((coordinates(point) for point in points if coordinates(point)), None)
+        if location is None:
+            raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
+        emoji, description = weather_annotation(activity, location, args.weather_template)
+        # 无天气：天气块与山峰、地图样式、通勤改动同一次 PUT 写入
+        status = update_activity(args, activity, emoji, description, peak_line=peak_line,
+                                 map_style=map_style, commute_fix=commute_fix)
+    if commute_fix and status == "updated" and not args.dry_run:
+        record_visibility_pending(activity_id)
+    return status
 
 
 def enqueue(state, activity_id, force):

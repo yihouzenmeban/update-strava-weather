@@ -8,6 +8,7 @@ strava_config.sh.*
 .strava_tokens.json
 .strava_tokens.*
 .strava_weather_state.*
+.strava_visibility_pending.json
 .strava_weather_sync.log*
 .strava_api_usage.json
 .env

@@ -142,17 +142,18 @@ class WebhookTests(SyncFixture):
         self.wait_worker()
         requests = self.requests()
         writes = [entry["body"] for entry in requests if entry.get("method") == "PUT"]
-        self.assertEqual(len(writes), int(expected != description))
-        if writes:
-            payload = {"description": expected}
-            if creates_weather:
-                payload["name"] = "晨跑 🌧️🥵"
-                # 全量写入时按功率数据设置地图样式（本用例活动无功率数据 → 配速）
-                payload["selected_polyline_style"] = "pace"
-            self.assertEqual(writes[0], payload)
+        # 流水线每次处理恰好一次 PUT：描述有清理/新增才带 description；
+        # 地图样式恒随行（本用例活动为无功率 Run → 配速），与描述是否变化无关
+        self.assertEqual(len(writes), 1)
+        payload = {"selected_polyline_style": "pace"}
+        if expected != description:
+            payload["description"] = expected
+        if creates_weather:
+            payload["name"] = "晨跑 🌧️🥵"
+        self.assertEqual(writes[0], payload)
         self.assertEqual(sum(entry["kind"] == "weather" for entry in requests), int(creates_weather))
-        # 新逻辑请求数：GET 活动详情 + 山峰匹配的 streams（reorder 开启时）+ 有写入时 PUT
-        expected_strava = 1 + (0 if disabled else 1) + (1 if writes else 0)
+        # 新逻辑请求数：GET 活动详情 + 山峰匹配的 streams（reorder 开启时）+ PUT
+        expected_strava = 1 + (0 if disabled else 1) + len(writes)
         self.assertEqual(sum(entry["kind"] == "strava" for entry in requests), expected_strava)
         self.assertFalse(any("/athlete/activities?" in entry["url"] for entry in requests))
 

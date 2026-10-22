@@ -251,7 +251,8 @@ peak_line = os.environ.get("PEAK_LINE", "").strip()
 reorder_enabled = os.environ.get("REORDER_SUMMITBAG") == "1"
 reorder_only = os.environ.get("STRAVA_REORDER_ONLY") == "1"
 if reorder_only:
-    # 仅更新山峰行：清旧 summitbag 内容，山峰行放天气前；天气不动
+    # 仅攒改动模式（天气已存在）：清旧 summitbag 内容，山峰行放天气前；天气与标题不动，
+    # 地图样式/通勤标记等改动在下方一并组装
     new_name = name
     new_desc = update_peak_line(desc, peak_line) if (reorder_enabled and update_peak_line) else desc
 else:
@@ -276,16 +277,20 @@ else:
 
 updates = {key: value for key, value, previous in (("name", new_name, name), ("description", new_desc, desc))
            if value != previous}
+# 通勤步攒下的改动（≤10km 非通勤骑行）：通勤标记 + 静音，与其它改动同一次 PUT
+if os.environ.get("STRAVA_COMMUTE_FIX") == "1":
+    updates["commute"] = True
+    updates["hide_from_home"] = True
 map_style = os.environ.get("MAP_STYLE", "").strip()
-if map_style and updates:
-    # 地图样式搭全量写入一并提交；该字段读不回来，不单独为它发请求
+if map_style and (updates or reorder_only):
+    # 地图样式读不回来：全量写入时搭同一次 PUT；仅攒改动模式下它本身即一项改动
     if not re.fullmatch(r"[a-z0-9_]+", map_style):
         print("❌ MAP_STYLE 格式无效", file=sys.stderr)
         sys.exit(1)
     updates["selected_polyline_style"] = map_style
 if not updates:
-    print("⏭️ 标题和描述没有变化，不更新")
-    sys.exit(0)
+    print("⏭️ 没有需要提交的变化，不更新")
+    sys.exit(3 if reorder_only else 0)
 json.dump(updates,
           open(sys.argv[2], "w", encoding="utf-8"), ensure_ascii=False)
 print("  原标题:", name)
