@@ -1,18 +1,18 @@
 # Strava webhook 部署与运维
 
 Strava 新活动产生时，官方 webhook 把事件推送到你的公网回调地址，
-`receiver.py` 收到后默认等 60 秒（可配置，让 Strava 及其它工具先完成活动处理），
+`receiver.py` 收到后按 `webhook.sync_delay_seconds` 延迟（让 Strava 及其它工具先完成活动处理），
 再触发 `update_strava_weather.sh sync --activity-id <id>`。同步行为、模板和离线山峰匹配
-统一见 [根目录 README](../README.md#用法)；本页说明事件、部署、延迟及个人 Hooks。
+统一见 [同步规则](../README.md#同步规则)；本页说明事件、部署、延迟及个人 Hooks。
 
 接收器只触发 `activity/create`，`activity/update` 和 `activity/delete` 均仅回复 200。
-已处理 ID 不重新入队，重复创建事件及定时扫描不会自动刷新后补数据。需要重算时见 [山峰匹配说明](../README.md#山峰匹配)；`--force` 同时重算天气和标题，不能当作仅刷新山峰。
+缓存跳过和重算边界沿用同步规则；重复事件的 HTTP 200 不代表后台已重新处理活动。
 
 ## 文件
 
-- `receiver.py` — webhook 接收服务（默认监听 127.0.0.1:8787）
+- `receiver.py` — webhook 接收服务；监听端点取 `webhook.listen_host` / `listen_port`，回调路径取 `webhook.path`，默认值见 [配置](../config.default.json)。下面以示例回调路径 `/strava-webhook` 表示验证与事件接口：
   - `GET /strava-webhook`：Strava 订阅验证（hub.challenge 握手）
-  - `POST /strava-webhook`：activity/create 事件 → 配置的延迟后触发单活动同步（默认 60 秒）
+  - `POST /strava-webhook`：activity/create 事件 → 配置的延迟后触发单活动同步
   - `GET /health`：存活探针
 - `systemd/` — 两个 unit 模板，路径、域名与监听端点由共享配置生成
 - `ensure.sh` — 幂等安装/恢复脚本；写入 systemd unit、启用服务并检查健康端点
@@ -74,7 +74,7 @@ PY
 
 ## 触发延迟
 
-默认 60 秒。在根目录 `config.local.json` 中合入 `"webhook": {"sync_delay_seconds": 120}` 即可覆盖，保留已有的验证令牌及 Hooks；缺失字段从默认配置继承。
+延迟默认值只在 [config.default.json](../config.default.json) 的 `webhook.sync_delay_seconds` 维护。例如在根目录 `config.local.json` 中合入 `"webhook": {"sync_delay_seconds": 120}`，可设置为 120 秒；保留已有的验证令牌及 Hooks，缺失字段从默认配置继承。
 
 也可通过接收器进程的环境变量 `WEBHOOK_SYNC_DELAY_SECONDS=120` 覆盖文件配置。
 优先级为环境变量 > 自定义配置 > 默认配置；取值必须是非负整数秒，`0` 表示不等待。
@@ -122,7 +122,7 @@ sudo systemctl restart strava-webhook-receiver.service
 
 ## 排障
 
-先检查服务与本地端点，再检查公网端点（下例使用默认监听端点，按实际配置调整并替换域名）：
+先检查服务与本地端点，再检查公网端点（下例的 `127.0.0.1:8787` 是示例监听端点，按实际配置调整并替换域名）：
 
 ```bash
 systemctl status strava-webhook-receiver.service strava-webhook-tunnel.service
@@ -132,7 +132,7 @@ curl -q -fsS --max-time 15 https://YOUR_NGROK_DOMAIN/health
 
 - 本地失败：查看 `webhook/logs/receiver.log`，检查 Python 路径、配置和目录访问权限。
 - 本地正常、公网失败：查看 `webhook/logs/ngrok.log`，核对 ngrok 路径、授权配置、域名及直接网络访问。
-- 已收到创建事件但未更新：延迟结束后查看 `webhook/logs/sync-<activity_id>.log`；根据授权、跳过或失败信息处理。已有处理记录时，普通单 ID 同步仍跳过。收到 HTTP 200 只代表事件已接收，不能据此认定后台同步成功。
+- 已收到创建事件但未更新：延迟结束后查看 `webhook/logs/sync-<activity_id>.log`；根据授权、跳过或失败信息，按 [同步规则](../README.md#同步规则) 排查。收到 HTTP 200 只代表事件已接收，不能据此认定后台同步成功。
 
 ## 本地模拟验证
 
@@ -146,6 +146,6 @@ bash tests/regression.sh webhook
 
 测试通过临时本机 HTTP 服务发送真实 POST，请求经过 `receiver.py`、后台子进程和真实的
 `sync --activity-id` 流程；Strava / Open-Meteo 使用模拟响应，凭据、活动和处理记录全部位于
-临时目录。测试替换 `sleep` 命令跳过实际等待，并核对传入的默认 60 秒、自定义 120 秒及 0 秒。
+临时目录。测试替换 `sleep` 命令跳过实际等待，并核对默认配置、自定义延迟及不等待的参数传递。
 
 覆盖事件筛选、后台响应与失败重试、延迟配置、重复事件跳过，以及不同描述格式下的天气补齐、旧山峰行清理和手写备注保留。山峰命中与新行插入单独由 `python3 tests/peaks.py` 验证；具体场景以测试实现为准。

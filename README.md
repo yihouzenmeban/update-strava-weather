@@ -9,7 +9,7 @@
 - 一站式：OAuth 授权 / 令牌自动刷新 / 拉取活动 / 追加天气 / 更新
 - `sync` 分页发现新增活动并重试积压任务；已有处理记录的 ID 不重新入队，需要 `--force` 才重新处理
 - 标题：默认在原标题后追加天气 emoji，可自定义排版与固定文案或关闭更新；emoji 按 weather_code、当地时段和极值生成（🌞⛅☁️🌫️🌧️❄️⛈️🌙），体感 >30 加 🥵、<0 加 🥶，风速 >30 km/h 加 💨
-- 描述：活动时段内各字段的 min - max（升序），默认模板保留 2 位小数
+- 描述：活动时段内各字段的 min - max（升序），精度由模板指定
 - 独立文本模板：自定义天气描述的字段、排版、精度和署名，默认输出保持原样
 - 山峰匹配：默认用全部有效轨迹点匹配离线 OSM 山峰库，将结果放在天气前，可配置关闭
 - 本地 API 用量统计及批量配额预留，优先为单活动同步保留额度
@@ -66,9 +66,9 @@ update-strava-weather/
    ```bash
    ./update_strava_weather.sh login
    ```
-   会自动开浏览器授权，回调到本地服务自动换令牌并缓存。授权 scope 含 `activity:read_all,activity:write`；回调校验随机 `state`，默认最多等待 5 分钟。
+   会自动开浏览器授权，回调到本地服务自动换令牌并缓存。授权 scope 含 `activity:read_all,activity:write`；回调校验随机 `state`，等待上限取 [默认配置](config.default.json) 的 `strava.oauth_timeout_seconds`，可在个人配置中覆盖。
 
-启用默认山峰功能前，按 [离线山峰库说明](peaks/README.md) 准备数据库；仓库不附带数据库，也不会自动下载。缺库时仍可同步天气，但山峰结果为空，可能清理原描述中的旧山峰数据行。
+启用山峰功能前，按 [离线山峰库说明](peaks/README.md) 准备数据库；仓库不附带数据库，也不会自动下载。缺库时仍可同步天气，但山峰结果为空，可能清理原描述中的旧山峰数据行。
 
 ## 配置
 
@@ -123,19 +123,32 @@ python3 project_config.py migrate
 ./update_strava_weather.sh sync --activity-id 123 --latitude 39.9 --longitude 116.4
 ```
 
-`sync` 默认直接补齐缺失天气。首次扫描最近 7 天；之后从“上次完整扫描时间往前 7 天”查到本轮开始时刻，覆盖停用期间。每页默认 50 条，可用 `--page-size` 调整为 1–200，完整分页扫描并去重。已有处理记录的 ID 不重新入队，跳过详情、轨迹和天气查询；此规则也适用于 `--all`、指定 ID 和重复 webhook 创建事件。未处理但已有天气的活动只更新山峰，不重算天气和标题；室内及 Virtual 活动跳过。
+### 同步规则
+
+`sync` 默认直接写入。首次扫描从本轮开始时刻往前回看，之后从“上次完整扫描时间减去回看天数”查到本轮开始时刻，覆盖停用期间。回看天数取 `sync.lookback_days`，每页数量取 `sync.page_size`，默认值统一见 [config.default.json](config.default.json)；可用 `--page-size` 调整为 1–200，完整分页扫描并去重。
+
+| 活动状态 | 处理行为 |
+| --- | --- |
+| 已有处理记录，且未要求强制重算 | 不重新入队，跳过详情、轨迹及天气查询；适用于默认扫描、历史补扫、指定 ID 和重复 webhook 事件 |
+| 室内或 Virtual 活动 | 跳过，`sync --force` 也不处理 |
+| 未处理但已有可识别天气，且未要求强制重算 | 不重算天气和标题；仍处理山峰行、地图样式及符合条件的通勤修正 |
+| 缺少天气，或已要求强制重算 | 计算天气并按模板更新标题和描述，同时合并山峰、地图样式及通勤改动 |
+
+当前同步可能提交的字段为 `name`、`description`、`selected_polyline_style`、`commute` 和 `hide_from_home`。标题与描述比较前后内容，仅提交变化字段；地图样式无法读回，有其它改动时随同提交，已有天气时也可单独提交样式。相关条件见 [地图样式](#地图样式) 和 [通勤修正](#通勤修正)。改动合并为一次 PUT，没有待提交字段时不写入。
 
 普通单条失败保留队列并继续其它活动，下次默认同步仍会重试范围外的积压；活动处理阶段上抛的 401、403 或 429 会停止本轮。活动返回 404 时记为 `gone` 并移出队列，不反复重试；404 也可能表示无访问权限，不能据此断言活动已删除。部分失败返回非零退出码。山峰轨迹获取错误会警告并降级为空山峰结果，包括该路径上的授权和限流错误；天气及写回流程仍可能继续。
 
 分页失败或扫描中断不推进扫描进度，已发现任务保留在队列；再次运行默认 `sync` 会覆盖原范围。`--dry-run` 或 `DRY_RUN=1` 会读取真实 API，但不写活动、队列、处理结果或扫描进度；请求仍消耗 API 配额，并更新本地用量记录。
 
-活动时间早于重叠范围的补传活动可能无法被默认扫描发现，请用 `--since` / `--until` 或 `--all` 补扫。显式日期范围和单个 ID 只处理所选活动，不处理范围外的积压，也不改变默认扫描进度；历史补扫分页失败后应重跑同一补扫命令。`--force` 重算本次查询范围内的活动，其强制重算标记会随失败任务保留到下次重试。
+活动时间早于重叠范围的补传活动可能无法被默认扫描发现，请用 `--since` / `--until` 或 `--all` 补扫。`--activity-id`、`--since`、`--all` 互斥，`--until` 只能与 `--since` 配合。显式日期范围和单个 ID 只处理所选活动，不处理范围外的积压，也不改变默认扫描进度；历史补扫分页失败后应重跑同一补扫命令。`--force` 重算整个所选范围的天气和标题，并按上述规则合并其它改动；当前没有独立的仅山峰刷新参数。强制重算标记会随失败任务保留到下次重试。
 
 每条活动详情只读取一次，后续判断、天气计算和描述合并共用这份快照。需要补天气时使用起点坐标（缺少时获取轨迹流）。山峰匹配与天气定位共用同一次轨迹读取，成功结果和读取错误均只在该活动内复用：通常为详情 GET + 轨迹 GET + PUT，缺起点也不会重复请求轨迹。不含列表分页、令牌刷新及 Open-Meteo 请求。`activity_update.py` 的 `build_updates()` 根据快照计算变化字段，供命令入口调用和隔离测试；仅更新山峰时只写 `description`，标题变化时才提交 `name`，全部无变化时不 PUT。本地同步锁避免本脚本并行写入，外部工具在读取后修改同一字段仍可能被覆盖。经纬度覆盖只允许配合 `--activity-id`，只用于天气定位，不替代山峰匹配的完整轨迹。
 
 旧版处理记录自动迁移并保留完成结果，同一仓库同时只能运行一个 `sync`。手动删除天气后请指定 ID 加 `--force` 重算。记录损坏时会报错，不自动清空；如需重建，先停止同步、私有备份再移走记录并重新补扫，原队列和扫描进度不会自动恢复。
 
 天气取值沿用活动开始时间加 `moving_time` 的区间，包含区间内采样点及首尾插值。emoji 的夜间判断使用 `start_date_local` 的当地钟表时间。Open-Meteo 请求使用 UTC 时间戳，近期活动用 forecast `minutely_15`，超过 5 天用 archive `hourly`，不会对缺失数据外推。
+
+### 定时与手动调用
 
 需要定时运行时，可自行将下例加入 crontab（替换仓库路径；此仓库不会自动安装定时任务）：
 
@@ -148,7 +161,7 @@ python3 project_config.py migrate
 直接读取 Strava API（复用本地授权，无需 MCP）：
 
 ```bash
-# 最新一次活动，返回 JSON 数组；也可 list 5 获取最近 5 次（数量范围 1–200）
+# 最近活动，返回 JSON 数组；数量取 strava.list_count，也可 list 5 指定（范围 1–200）
 ./update_strava_weather.sh list
 
 # 活动详情，返回 JSON 对象
@@ -183,7 +196,7 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 - `sync` — 批量增量同步或历史补扫；常用选项有 `--activity-id`、`--since` / `--until`、`--all`、`--force`、`--dry-run`、`--template` 和 `--reorder-summitbag` / `--no-reorder-summitbag`。配置完成后运行 `./update_strava_weather.sh sync --help` 查看完整参数
 - `login` — 浏览器授权换令牌
 - `auth` — 从标准输入读取授权码并换令牌；终端输入不回显，避免写进命令行参数和历史
-- `list [数量]` — 获取最近的活动，默认 1 条，最多 200 条（`GET /athlete/activities`）
+- `list [数量]` — 获取最近的活动，数量取 `strava.list_count`，最多 200 条（`GET /athlete/activities`）；默认值见 [配置](config.default.json)
 - `get` — 获取 `ACTIVITY_ID` 对应的活动详情（`GET /activities/{id}`）
 - `streams` — 获取 `ACTIVITY_ID` 对应的坐标流（`GET /activities/{id}/streams`，`keys=latlng`）
 - `show` — 等同 `DRY_RUN=1`，仅预览
@@ -196,7 +209,7 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 - `WEATHER_EMOJI` / `WEATHER_EMOJI_FILE` 追加到标题的 emoji
 - `WEATHER_DESC` / `WEATHER_DESC_FILE` 追加到描述的天气块
 - `WEATHER_TEMPLATE_FILE` 天气描述模板路径，用于 `sync` 生成及更新时识别旧天气块
-- `REORDER_SUMMITBAG` 默认 `1`，开启山峰匹配与山峰行替换（旧名称）；设为 `0` 关闭
+- `REORDER_SUMMITBAG` 覆盖 `weather.reorder_summitbag`（旧名称）；`1` 开启山峰匹配与山峰行替换，`0` 关闭，默认值见 [配置](config.default.json)
 - `DRY_RUN=1` 仅预览
 - `YES=1` 跳过确认
 
@@ -209,12 +222,12 @@ ACTIVITY_ID=123 WEATHER_EMOJI='☁️🥵' WEATHER_DESC_FILE=/path/to/desc.txt Y
 
 **模式二：webhook 实时推送（需要公网回调）**
 Strava 有新活动时官方把事件推送到你的回调地址，
-`webhook/receiver.py` 收到创建事件后默认等 60 秒再触发单活动同步。配置、部署与排障见 [webhook 说明](webhook/README.md)。
+`webhook/receiver.py` 收到创建事件后按 `webhook.sync_delay_seconds` 延迟，再触发单活动同步。配置、部署与排障见 [webhook 说明](webhook/README.md)。
 两种模式可并存（webhook 为主、定时为兜底），也可只选其一。
 
 ## 标题模板
 
-默认配置为 `title.enabled: true`、`title.template: "{title} {emoji}"`，保持现有「原标题 + 空格 + 天气 emoji」格式与旧天气标记清理规则。用户在已有 `config.local.json` 中合入覆盖项即可，例如将 emoji 放到前面并加固定文案：
+标题开关与模板分别由 `title.enabled`、`title.template` 控制，默认值见 [config.default.json](config.default.json)。用户在已有 `config.local.json` 中合入覆盖项即可，例如将 emoji 放到前面并加固定文案：
 
 ```json
 {
@@ -228,7 +241,7 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 
 设置 `"title": {"enabled": false}` 可完整保留当前标题，包括原有 emoji；仅设置 `"template": "{title}"` 则仍会清理末尾旧天气标记。同一模板重复生成不会叠加固定前后缀；更换已应用的自定义前后缀时，应先清理标题中的旧文案，当前只识别当前模板和原有末尾天气标记。
 
-自动同步、webhook 和手动更新共用配置。仅更新山峰时保持标题不变；已有天气或处理记录的活动需要显式重算才能应用新模板，建议先预览（将 `123` 替换为实际 ID）：
+自动同步、webhook 和手动更新共用配置。对已有天气或处理记录的活动应用新标题模板时，按 [同步规则](#同步规则) 重算，建议先预览（将 `123` 替换为实际 ID）：
 
 ```bash
 ./update_strava_weather.sh sync --activity-id 123 --force --dry-run
@@ -270,13 +283,13 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 
 **防重复与更新规则：** 描述包含 `www.gearaut.com`，或完整匹配当前模板的固定文案、字段位置与换行，即视为已有天气。数值和天气 emoji 按类型匹配，不要求等于本次计算结果；同时兼容历史 gearaut / QWeather 天气块。只有标题 emoji 时仍会补齐描述。每次同步基于本次读取的数据判断，失败重试时重新读取并计算。
 
-默认同步跳过已处理 ID；未处理但已有天气的活动跳过天气步（gearaut 或本工具写入的都算），山峰、地图样式与通勤的改动仍会攒成一次 PUT 提交，无改动则不发请求；更换模板后，可指定活动加 `--force` 更新天气。强制更新仅移除能定位的旧格式或当前模板天气块，保留前后备注；山峰行另按下述规则替换。若含域名但无法定位旧天气块，会报错而不追加。旧版 `reorder_summitbag.sh` 使用同一模板配置识别天气块。
+何时重算及其它字段的合并行为见 [同步规则](#同步规则)。强制更新仅移除能定位的旧格式或当前模板天气块，保留前后备注；山峰行另按下述规则替换。若含域名但无法定位旧天气块，会报错而不追加。旧版 `reorder_summitbag.sh` 使用同一模板配置识别天气块。
 
 建议个人模板保留 `www.gearaut.com` 署名，以便改版后仍能防重复。无署名的自定义模板只能按当前结构识别：修改固定文案或换行前，请保留旧模板，必要时手动清理旧天气块后再强制更新。
 
 ## 地图样式
 
-每次处理活动时，`sync` 都按活动是否有功率数据攒下地图样式（`selected_polyline_style`）：详情含 `average_watts` / `weighted_average_watts` 时用功率样式（默认 `power`），否则用配速样式（默认 `pace`）；越野跑（`TrailRun`）和徒步（`Hike`）不设置。样式与本次其它改动（标题、描述、通勤标记）在同一次 PUT 中提交，不额外发请求；已有天气的活动仅补样式时也发这一次 PUT。该字段无法通过 API 读回，同步不判断当前样式是否已经一致。配置组 `map_style` 可关闭（`enabled`）或更换 `power` / `no_power` 的样式值，可选值见 [官方 PUT 实测](docs/put-activity-api.md)。
+进入活动处理流程后，`sync` 按功率数据选择地图样式（`selected_polyline_style`）：详情中的 `average_watts` 或 `weighted_average_watts` 至少一项是非布尔数值且大于 0 时，选择 `map_style.power`；否则选择 `map_style.no_power`。仅有字段但值为 `0`、`null` 或布尔值不算有效功率。越野跑（`TrailRun`）和徒步（`Hike`）不设置；`map_style.enabled` 可关闭此功能，默认值见 [配置](config.default.json)。该字段无法通过 API 读回，同步不判断当前样式是否已经一致；提交时机见 [同步规则](#同步规则)，可选样式见 [官方 PUT 实测](docs/put-activity-api.md)。
 
 ## 通勤修正
 
@@ -284,7 +297,7 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 
 ## 山峰匹配
 
-默认开启，保留旧配置名 `weather.reorder_summitbag` 和命令行参数。`sync` 用完整 GPS 轨迹与本机 SQLite 山峰库匹配；数据库准备、运动类型距离规则、重复经过计数及输出格式统一见 [离线山峰库说明](peaks/README.md)。不根据活动标题猜山名，也不再保留 summitbag 数据作为结果。
+开关保留旧配置名 `weather.reorder_summitbag` 和命令行参数，默认值见 [配置](config.default.json)。`sync` 用完整 GPS 轨迹与本机 SQLite 山峰库匹配；数据库准备、运动类型距离规则、重复经过计数及输出格式统一见 [离线山峰库说明](peaks/README.md)。不根据活动标题猜山名，也不再保留 summitbag 数据作为结果。
 
 输出顺序为「天气前的手写备注 → 新山峰行 → 天气」，例如以下为格式示意，山名与数值需以实际匹配结果为准：
 
@@ -298,7 +311,7 @@ Powered By www.gearaut.com
 
 旧 summitbag 链接、年度爬升行及以山峰 emoji 开头并带括号海拔的行会整行删除，再插入新结果；空结果也会删除旧行。缺库、无匹配、轨迹不足或轨迹获取失败均可能产生空结果，不代表保留旧数据。普通的 `⛰️ 今天的手写游记` 不作为山峰数据；其它备注和天气正文保留，空行可能规范化。没有可识别天气块时，新山峰行追加到剩余描述后。
 
-已有天气且尚无处理记录时，不动天气与标题，只攒山峰（及地图样式、通勤）改动。已有处理记录的活动不会再次检查山峰；确需刷新时使用下例，**`--force` 同时重算天气与标题**：
+缓存和重算范围统一见 [同步规则](#同步规则)。刷新指定活动时先预览：
 
 ```bash
 ./update_strava_weather.sh sync --activity-id 123 --force --dry-run
@@ -326,7 +339,7 @@ python3 api_usage.py check     # 批量预留检查：通过返回 0，触线返
 
 看到暂停应等相应窗口恢复后再运行，不要拆成单 ID 绕过保护。`bash backfill_all.sh` 收到退出码 `4` 后，按 `backfill.rate_retry_seconds` 等待再重试，不立即重扫列表，也不计入快速失败次数。实际 HTTP 429 的退避是另一条错误路径。
 
-接口研究资料见 [官方 PUT 历史实测](docs/put-activity-api.md) 与 [网页表单分析](docs/web-activity-api.md)。当前天气同步仅更新 `name` / `description`，这些资料不代表同步已支持其它字段，也不授权额外修改活动。
+接口研究资料见 [官方 PUT 历史实测](docs/put-activity-api.md) 与 [网页表单分析](docs/web-activity-api.md)。当前写入字段以 [同步规则](#同步规则) 和实现为准；历史资料中其它字段的可用性不代表同步已支持它们，也不扩大本次活动修改范围。
 
 ## AI Skill
 
