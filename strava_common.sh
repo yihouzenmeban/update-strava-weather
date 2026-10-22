@@ -111,3 +111,92 @@ check_api_status() {
     *) die "Strava API HTTP ${1}：请求失败" ;;
   esac
 }
+
+check_config() {
+  if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
+    die "请在 config.local.json 的 strava.client_id 中填好 CLIENT_ID"
+  fi
+  if [[ -z "${CLIENT_SECRET:-}" || "$CLIENT_SECRET" == *"在这里粘贴"* ]]; then
+    die "请在 config.local.json 的 strava.client_secret 中填好 CLIENT_SECRET"
+  fi
+  return 0
+}
+
+# 确保拿到未过期的 access_token：有效就直接用，过期就刷新，都不行就返回非零交由调用方走 login
+ensure_token() {
+  if [[ ! -f "$TOKEN_FILE" ]]; then
+    echo "→ 没有令牌缓存，需要授权"
+    return 1
+  fi
+  local access refresh expires now
+  access=$(token_field access_token)
+  refresh=$(token_field refresh_token)
+  expires=$(token_field expires_at)
+  if [[ -z "$access" || -z "$refresh" ]]; then
+    echo "→ 令牌缓存不完整，需要重新授权"
+    return 1
+  fi
+
+  now=$(date +%s)
+  if (( now < expires - TOKEN_REFRESH_MARGIN_SECONDS )); then
+    echo "→ 令牌仍有效，跳过刷新"
+    return 0
+  fi
+
+  echo "→ 令牌已过期，刷新中..."
+  local resp
+  resp=$(oauth_token_request refresh_token "$refresh")
+  if ! echo "$resp" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+if "access_token" not in d:
+    print("→ 刷新失败（refresh_token 可能已失效），转为重新授权");sys.exit(1)
+print("✅ 已刷新")
+'; then
+    return 1
+  fi
+  NEW=$(echo "$resp" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(json.dumps({k:d[k] for k in ("access_token","refresh_token","expires_at","scope") if k in d}))')
+  save_tokens
+  return 0
+}
+
+require_token() {
+  if ensure_token; then
+    return 0
+  fi
+  [[ "${STRAVA_NONINTERACTIVE:-}" != "1" ]] || die "请先运行 ./update_strava_weather.sh login 完成授权，再重试 sync"
+  do_login
+}
+
+
+strava_request() (
+  local method="$1" url="$2" body_file="${3:-}"
+  require_token >&2
+  local access work_dir response_file code
+  local -a arguments=(-X "$method")
+  access=$(token_field access_token)
+  work_dir=$(mktemp -d "${TMPDIR:-/tmp}/strava-request.XXXXXX")
+  trap 'rm -rf "$work_dir"' EXIT
+  response_file="$work_dir/response.json"
+  if [[ -n "$body_file" ]]; then
+    arguments+=(-H "Content-Type: application/json; charset=utf-8" --data-binary "@$body_file")
+  fi
+  if ! code=$(strava_curl "$access" "${arguments[@]}" \
+    -o "$response_file" -w "%{http_code}" \
+    "$url"); then
+    die "Strava API 网络请求失败"
+  fi
+  check_api_status "$code"
+  python3 - "$response_file" <<'PY'
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as response:
+        data = json.load(response)
+except (ValueError, OSError):
+    print("❌ Strava API 返回了无效的 JSON 响应", file=sys.stderr)
+    sys.exit(1)
+json.dump(data, sys.stdout, ensure_ascii=False)
+print()
+PY
+)

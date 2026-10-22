@@ -6,6 +6,7 @@ import math
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +80,14 @@ class MatchTest(unittest.TestCase):
         pts += track_through(10.001, 20.0, n=200)
         matched = dict((m[0], m[2]) for m in peaks.match_peaks(pts, "TrailRun", db_paths=self.db))
         self.assertEqual(matched.get("测试峰"), 2)
+
+    def test_matching_counts_passes_in_one_distance_traversal(self):
+        points = [(10.001, 20.0), (10.02, 20.0), (10.001, 20.0)]
+        candidate = {"id": 1, "name": "测试峰", "elevation_m": 500, "lat": 10.001, "lon": 20.0}
+        with patch.object(peaks, "candidate_peaks", return_value=[candidate]), \
+                patch.object(peaks, "haversine_m", wraps=peaks.haversine_m) as distance:
+            self.assertEqual(peaks.match_peaks(points, "TrailRun"), [("测试峰", 500, 2)])
+            self.assertEqual(distance.call_count, len(points))
 
     def test_format_line(self):
         line = peaks.format_peak_line([("大阳台", 587.0, 2), ("小阳台", 465.0, 1), ("无名峰", None, 1)])

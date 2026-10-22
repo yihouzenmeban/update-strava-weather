@@ -60,6 +60,9 @@ if "--data-binary" in args:
     entry["body_mode"] = stat.S_IMODE(body.stat().st_mode)
     entry["body"] = json.loads(body.read_text())
 activity = {"id": 123, "name": "晨跑", "description": "原备注", "sport_type": "Run"}
+if os.environ.get("MOCK_REORDER") == "1":
+    activity.update(sport_type="TrailRun", description=(
+        "原备注\n温度: 10°C - 12°C\nPowered By www.gearaut.com\nhttps://summitbag.com/example"))
 payload = [activity] if "/athlete/activities?" in url else activity
 output.write_text(json.dumps(payload))
 entry["file_mode"] = stat.S_IMODE(output.stat().st_mode)
@@ -67,32 +70,14 @@ record()
 print(os.environ.get("MOCK_STATUS", "200"), end="")
 '''
 
-URLLIB_MOCK = r'''
-import json, os, urllib.request
-class Response:
-    headers = {}
-    def __init__(self, value): self.value = value
-    def read(self): return json.dumps(self.value).encode()
-def urlopen(request, timeout=None):
-    with open("requests.jsonl", "a") as log:
-        log.write(json.dumps({"method": request.get_method(), "url": request.full_url}) + "\n")
-    if request.get_method() == "PUT":
-        return Response({"id": 123})
-    if "/athlete/activities?" in request.full_url:
-        return Response([{"id": 123, "sport_type": "TrailRun"}])
-    return Response({"id": 123, "name": "测试活动", "description":
-                     "原备注\n温度: 10°C - 12°C\nPowered By www.gearaut.com\nhttps://summitbag.com/example"})
-urllib.request.urlopen = urlopen
-'''
-
-
 class ScriptSecurityTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="strava-security-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
         for name in ("update_strava_weather.sh", "reorder_summitbag.sh", "strava_common.sh", "strava_oauth.py",
-                     "weather_template.py", "project_config.py", "config.default.json"):
+                     "weather_template.py", "project_config.py", "config.default.json", "api_usage.py",
+                     "peaks.py", "activity_update.py"):
             source = ROOT / name
             if source.exists():
                 shutil.copy2(source, self.directory)
@@ -108,7 +93,6 @@ class ScriptSecurityTests(unittest.TestCase):
         mock = self.directory / "bin/curl"
         mock.write_text(CURL_MOCK)
         mock.chmod(0o755)
-        (self.directory / "sitecustomize.py").write_text(URLLIB_MOCK)
         self.runtime = self.directory / "runtime"
         self.runtime.mkdir()
         self.environment = os.environ.copy()
@@ -122,7 +106,8 @@ class ScriptSecurityTests(unittest.TestCase):
     def run_script(self, script, *args, trace=False, input_text="", **environment):
         command = ["bash", "-x", script] if trace else ["bash", script]
         return subprocess.run(command + list(args), cwd=self.directory,
-                              env=dict(self.environment, **environment), input=input_text,
+                              env=dict(self.environment, MOCK_REORDER="1" if script == "reorder_summitbag.sh" else "0",
+                                       **environment), input=input_text,
                               text=True, capture_output=True, timeout=15)
 
     def requests(self):
@@ -231,6 +216,22 @@ class ScriptSecurityTests(unittest.TestCase):
     def test_reorder_still_writes_when_explicitly_enabled(self):
         self.assert_success(self.run_script("reorder_summitbag.sh", YES="1"))
         self.assertIn("PUT", [entry["method"] for entry in self.requests()])
+
+    def test_reorder_requests_share_usage_tracking(self):
+        self.assert_success(self.run_script("reorder_summitbag.sh", YES="1"))
+        usage = json.loads((self.directory / ".strava_api_usage.json").read_text())
+        self.assertEqual(usage["read_daily"], 3)
+        self.assertEqual([entry["method"] for entry in self.requests()], ["GET", "GET", "PUT"])
+
+    def test_reorder_budget_pause_prevents_requests(self):
+        import datetime as dt
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        (self.directory / ".strava_api_usage.json").write_text(json.dumps({
+            "daily_date": today, "read_daily": 1800, "window": [],
+        }))
+        result = self.run_script("reorder_summitbag.sh", YES="1")
+        self.assertEqual(result.returncode, 4, result.stderr + result.stdout)
+        self.assertEqual(self.requests(), [])
 
     def test_reorder_and_read_use_shared_paging_defaults(self):
         path = self.directory / "config.local.json"

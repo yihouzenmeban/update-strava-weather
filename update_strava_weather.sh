@@ -46,16 +46,6 @@ WEATHER_DESC="${WEATHER_DESC:-}"
 [[ -n "${WEATHER_EMOJI_FILE:-}" && -f "$WEATHER_EMOJI_FILE" ]] && WEATHER_EMOJI=$(cat "$WEATHER_EMOJI_FILE")
 [[ -n "${WEATHER_DESC_FILE:-}" && -f "$WEATHER_DESC_FILE" ]] && WEATHER_DESC=$(cat "$WEATHER_DESC_FILE")
 
-check_config() {
-  if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
-    die "请在 config.local.json 的 strava.client_id 中填好 CLIENT_ID"
-  fi
-  if [[ -z "${CLIENT_SECRET:-}" || "$CLIENT_SECRET" == *"在这里粘贴"* ]]; then
-    die "请在 config.local.json 的 strava.client_secret 中填好 CLIENT_SECRET"
-  fi
-  return 0
-}
-
 # 启动本地服务接住授权回调，自动拿 code 并换令牌（无需自己起服务）
 do_login() {
   local code
@@ -87,52 +77,6 @@ print("  过期时间  :",time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(d["ex
   echo "→ 令牌已保存到 $TOKEN_FILE"
 }
 
-# 确保拿到未过期的 access_token：有效就直接用，过期就刷新，都不行就返回非零交由调用方走 login
-ensure_token() {
-  if [[ ! -f "$TOKEN_FILE" ]]; then
-    echo "→ 没有令牌缓存，需要授权"
-    return 1
-  fi
-  local access refresh expires now
-  access=$(token_field access_token)
-  refresh=$(token_field refresh_token)
-  expires=$(token_field expires_at)
-  if [[ -z "$access" || -z "$refresh" ]]; then
-    echo "→ 令牌缓存不完整，需要重新授权"
-    return 1
-  fi
-
-  now=$(date +%s)
-  if (( now < expires - TOKEN_REFRESH_MARGIN_SECONDS )); then
-    echo "→ 令牌仍有效，跳过刷新"
-    return 0
-  fi
-
-  echo "→ 令牌已过期，刷新中..."
-  local resp
-  resp=$(oauth_token_request refresh_token "$refresh")
-  if ! echo "$resp" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-if "access_token" not in d:
-    print("→ 刷新失败（refresh_token 可能已失效），转为重新授权");sys.exit(1)
-print("✅ 已刷新")
-'; then
-    return 1
-  fi
-  NEW=$(echo "$resp" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(json.dumps({k:d[k] for k in ("access_token","refresh_token","expires_at","scope") if k in d}))')
-  save_tokens
-  return 0
-}
-
-require_token() {
-  if ensure_token; then
-    return 0
-  fi
-  [[ "${STRAVA_NONINTERACTIVE:-}" != "1" ]] || die "请先运行 ./update_strava_weather.sh login 完成授权，再重试 sync"
-  do_login
-}
-
 # 只读 API 用子 shell 管理临时文件，不影响更新命令的 EXIT trap。
 do_read() (
   local endpoint
@@ -159,29 +103,7 @@ do_read() (
       ;;
   esac
 
-  require_token >&2
-  local access response_file code
-  access=$(token_field access_token)
-  response_file=$(mktemp "${TMPDIR:-/tmp}/strava-read.XXXXXX")
-  trap 'rm -f "$response_file"' EXIT
-  if ! code=$(strava_curl "$access" \
-    -o "$response_file" -w "%{http_code}" \
-    "https://www.strava.com/api/v3/${endpoint}"); then
-    die "Strava API 网络请求失败"
-  fi
-  check_api_status "$code"
-  python3 - "$response_file" <<'PY'
-import json, sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as response:
-        data = json.load(response)
-except (ValueError, OSError):
-    print("❌ Strava API 返回了无效的 JSON 响应", file=sys.stderr)
-    sys.exit(1)
-json.dump(data, sys.stdout, ensure_ascii=False)
-print()
-PY
+  strava_request GET "https://www.strava.com/api/v3/${endpoint}"
 )
 
 # 更新活动：拉取当前 name/description，去掉旧天气标注，追加新天气后 PUT
@@ -208,98 +130,7 @@ do_update() (
 
   # 2) 计算追加后的 name / description，写到 body 文件
   WEATHER_EMOJI="$WEATHER_EMOJI" WEATHER_DESC="$WEATHER_DESC" \
-    python3 - "$work_dir/activity.json" "$body_file" "$SCRIPT_DIR" <<'PY'
-import json, sys, os, re
-
-sys.path.insert(0, sys.argv[3])
-from weather_template import load_template, render_title, strip_weather
-try:
-    from peaks import update_peak_line
-except ImportError:
-    update_peak_line = None
-
-try:
-    template = load_template(os.environ.get("WEATHER_TEMPLATE_FILE"))
-except ValueError as error:
-    print(f"❌ {error}", file=sys.stderr)
-    sys.exit(1)
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as source:
-        act = json.load(source)
-except (OSError, ValueError):
-    print("❌ 无法读取有效活动数据", file=sys.stderr)
-    sys.exit(1)
-if not isinstance(act, dict) or str(act.get("id")) != os.environ["ACTIVITY_ID"]:
-    print("❌ 活动 ID 与目标不一致或数据无效", file=sys.stderr)
-    sys.exit(1)
-
-# 跑步机等室内活动没有真实户外天气，跳过天气标注
-# 判定：trainer=true（ treadmill ）或 sport_type 为 Virtual* 系列
-# FORCE=1 可强制处理（用于清理之前误标的跑步机活动）
-sport_type = act.get("sport_type", "") or ""
-is_trainer = bool(act.get("trainer", False))
-is_virtual = sport_type.startswith("Virtual")
-if (is_trainer or is_virtual) and os.environ.get("FORCE", "") != "1":
-    print(f"⏭️ 跳过跑步机/室内活动（sport_type={sport_type}, trainer={is_trainer}），不更新天气")
-    print("   如需清理已误标的旧天气标注，请加 FORCE=1")
-    sys.exit(2)
-
-name = act.get("name", "") or ""
-desc = act.get("description", "") or ""
-peak_line = os.environ.get("PEAK_LINE", "").strip()
-reorder_enabled = os.environ.get("REORDER_SUMMITBAG") == "1"
-reorder_only = os.environ.get("STRAVA_REORDER_ONLY") == "1"
-if reorder_only:
-    # 仅攒改动模式（天气已存在）：清旧 summitbag 内容，山峰行放天气前；天气与标题不动，
-    # 地图样式/通勤标记等改动在下方一并组装
-    new_name = name
-    new_desc = update_peak_line(desc, peak_line) if (reorder_enabled and update_peak_line) else desc
-else:
-    emoji = os.environ["WEATHER_EMOJI"].strip()
-    block = os.environ["WEATHER_DESC"].strip()
-
-    new_name = render_title(name, emoji)
-
-    # 描述：去掉旧天气块（兼容历史署名），再追加新块
-    try:
-        desc_clean = strip_weather(desc, template)
-    except ValueError as error:
-        print(f"❌ {error}", file=sys.stderr)
-        sys.exit(1)
-    if block:
-        new_desc = (desc_clean + "\n" + block) if desc_clean else block
-    else:
-        new_desc = desc_clean
-    # 山峰行放天气前（离线库匹配，替代 summitbag 排序）
-    if reorder_enabled and update_peak_line:
-        new_desc = update_peak_line(new_desc, peak_line)
-
-updates = {key: value for key, value, previous in (("name", new_name, name), ("description", new_desc, desc))
-           if value != previous}
-# 通勤步攒下的改动（≤10km 非通勤骑行）：通勤标记 + 静音，与其它改动同一次 PUT
-if os.environ.get("STRAVA_COMMUTE_FIX") == "1":
-    updates["commute"] = True
-    updates["hide_from_home"] = True
-map_style = os.environ.get("MAP_STYLE", "").strip()
-if map_style and (updates or reorder_only):
-    # 地图样式读不回来：全量写入时搭同一次 PUT；仅攒改动模式下它本身即一项改动
-    if not re.fullmatch(r"[a-z0-9_]+", map_style):
-        print("❌ MAP_STYLE 格式无效", file=sys.stderr)
-        sys.exit(1)
-    updates["selected_polyline_style"] = map_style
-if not updates:
-    print("⏭️ 没有需要提交的变化，不更新")
-    sys.exit(3 if reorder_only else 0)
-json.dump(updates,
-          open(sys.argv[2], "w", encoding="utf-8"), ensure_ascii=False)
-print("  原标题:", name)
-print("  新标题:", new_name)
-if desc:
-    print("  原描述:", desc.replace("\n", " | "))
-print("  新描述:")
-print(new_desc)
-PY
+    python3 "$SCRIPT_DIR/activity_update.py" "$work_dir/activity.json" "$body_file" "$ACTIVITY_ID"
 
   [[ -f "$body_file" ]] || return 0
 

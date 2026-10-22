@@ -18,6 +18,12 @@ while [ "$round" -lt "$MAX_ROUNDS" ]; do
   code=$?
   elapsed=$(( $(date +%s) - start_ts ))
   echo "===== [$(date '+%F %T')] 第 $round 轮退出码 $code（用时 ${elapsed}s） =====" >> "$LOG"
+  if [ "$code" -eq 4 ]; then
+    echo "配额预留暂停，等待 ${BACKFILL_RATE_RETRY_SECONDS}s 后重试" >> "$LOG"
+    sleep "$BACKFILL_RATE_RETRY_SECONDS"
+    fast429=0
+    continue
+  fi
   if tail -30 "$LOG" | grep -q "已有 sync 正在运行"; then
     echo "撞锁，等待 ${BACKFILL_LOCK_RETRY_SECONDS}s 后重试" >> "$LOG"
     sleep "$BACKFILL_LOCK_RETRY_SECONDS"

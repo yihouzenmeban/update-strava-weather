@@ -43,7 +43,7 @@ test_reorder_preserves_trailing_text() {
   local occurrences
 
   mkdir -p "$work_dir"
-  cp "$ROOT_DIR/reorder_summitbag.sh" "$ROOT_DIR/strava_common.sh" "$work_dir/"
+  cp "$ROOT_DIR/reorder_summitbag.sh" "$ROOT_DIR/strava_common.sh" "$ROOT_DIR/api_usage.py" "$work_dir/"
   if [[ -f "$ROOT_DIR/weather_template.py" ]]; then
     cp "$ROOT_DIR/weather_template.py" "$work_dir/"
   fi
@@ -51,47 +51,33 @@ test_reorder_preserves_trailing_text() {
   cat > "$work_dir/.strava_tokens.json" <<'EOF'
 {"access_token":"test-access-token","refresh_token":"test-refresh-token","expires_at":4102444800}
 EOF
-  cat > "$work_dir/sitecustomize.py" <<'PY'
+  mkdir -p "$work_dir/bin"
+  cat > "$work_dir/bin/curl" <<'PY'
+#!/usr/bin/env python3
 import json
 import os
-import urllib.request
+from pathlib import Path
+import sys
 
-
-class FakeResponse:
-    headers = {}
-
-    def __init__(self, body):
-        self._body = json.dumps(body, ensure_ascii=False).encode("utf-8")
-
-    def read(self):
-        return self._body
-
-
-def fake_urlopen(request, timeout=None):
-    url = request.full_url
-    if "/athlete/activities" in url:
-        return FakeResponse([{"id": 1, "sport_type": "TrailRun"}])
-    if "/activities/1" in url:
-        weather = ("温度: 10°C - 12°C\n湿度: 60% - 70%\nPowered By www.gearaut.com\n")
-        if os.environ.get("REORDER_CUSTOM"):
-            weather = "我的天气 🌙\n气温 -2.0～5.0°C\n"
-        return FakeResponse({
-            "id": 1,
-            "name": "测试活动",
-            "description": (
-                "原备注\n"
-                + weather +
-                "活动后的重要备注\n"
-                "https://summitbag.com/example"
-            ),
-        })
+args = sys.argv[1:]
+assert sys.stdin.read().strip() == "Authorization: Bearer test-access-token"
+url = next(arg for arg in args if arg.startswith("https://"))
+if "/athlete/activities" in url:
+    payload = [{"id": 1, "sport_type": "TrailRun"}]
+elif "/activities/1" in url:
+    weather = "温度: 10°C - 12°C\n湿度: 60% - 70%\nPowered By www.gearaut.com\n"
+    if os.environ.get("REORDER_CUSTOM"):
+        weather = "我的天气 🌙\n气温 -2.0～5.0°C\n"
+    payload = {"id": 1, "name": "测试活动", "description": (
+        "原备注\n" + weather + "活动后的重要备注\nhttps://summitbag.com/example")}
+else:
     raise AssertionError(f"unexpected URL: {url}")
-
-
-urllib.request.urlopen = fake_urlopen
+Path(args[args.index("-o") + 1]).write_text(json.dumps(payload))
+print("200", end="")
 PY
+  chmod +x "$work_dir/bin/curl"
 
-  output=$(cd "$work_dir" && PYTHONPATH="$work_dir" ./reorder_summitbag.sh)
+  output=$(cd "$work_dir" && PATH="$work_dir/bin:$PATH" ./reorder_summitbag.sh)
   occurrences=$(grep -o "活动后的重要备注" <<< "$output" | wc -l | tr -d ' ')
 
   [[ "$occurrences" == "2" ]] || fail "reorder deleted unrelated text after the weather block"
@@ -109,14 +95,14 @@ config = json.loads(path.read_text())
 config["weather"] = {"template_file": "custom.txt"}
 path.write_text(json.dumps(config))
 PY
-  output=$(cd "$work_dir" && PYTHONPATH="$work_dir" REORDER_CUSTOM=1 ./reorder_summitbag.sh)
+  output=$(cd "$work_dir" && PATH="$work_dir/bin:$PATH" REORDER_CUSTOM=1 ./reorder_summitbag.sh)
   [[ "$output" == *"共 1 条活动需要调整"* ]] || fail "reorder did not recognize custom weather"
   occurrences=$(grep -o "活动后的重要备注" <<< "$output" | wc -l | tr -d ' ')
   [[ "$occurrences" == "2" ]] || fail "custom reorder deleted trailing notes"
   [[ "$output" == *$'https://summitbag.com/example\n    | 我的天气 🌙'* ]] || fail "summitbag was not moved before custom weather"
   echo "PASS: reorder recognizes custom templates and preserves trailing text"
 
-  output=$(cd "$work_dir" && PYTHONPATH="$work_dir" REORDER_SUMMITBAG=0 YES=1 ./reorder_summitbag.sh)
+  output=$(cd "$work_dir" && PATH="$work_dir/bin:$PATH" REORDER_SUMMITBAG=0 YES=1 ./reorder_summitbag.sh)
   [[ "$output" == *"山峰排序已关闭"* && "$output" != *"拉取活动列表"* ]] || fail "disabled reorder still queried activities"
   echo "PASS: standalone reorder can be disabled before API requests"
 }
@@ -282,6 +268,7 @@ case "${1:-all}" in
   api_usage) python3 "$ROOT_DIR/tests/api_usage.py" ;;
   peaks) python3 "$ROOT_DIR/tests/peaks.py" ;;
   templates) python3 "$ROOT_DIR/tests/templates.py" ;;
+  activity_update) python3 "$ROOT_DIR/tests/activity_update.py" ;;
   webhook) python3 "$ROOT_DIR/tests/webhook.py" ;;
   all)
     python3 "$ROOT_DIR/tests/config.py"
@@ -289,6 +276,7 @@ case "${1:-all}" in
     test_reorder_preserves_trailing_text
     test_read_commands
     python3 "$ROOT_DIR/tests/templates.py"
+    python3 "$ROOT_DIR/tests/activity_update.py"
     python3 "$ROOT_DIR/tests/security.py"
     python3 "$ROOT_DIR/tests/sync.py"
     python3 "$ROOT_DIR/tests/api_usage.py"

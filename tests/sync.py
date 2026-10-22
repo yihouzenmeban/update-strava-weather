@@ -100,7 +100,7 @@ class SyncFixture(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
         for name in ("update_strava_weather.sh", "strava_common.sh", "strava_sync.py", "weather_template.py",
-                     "project_config.py", "config.default.json", "peaks.py"):
+                     "project_config.py", "config.default.json", "peaks.py", "api_usage.py", "activity_update.py"):
             if (ROOT / name).exists():
                 shutil.copy2(ROOT / name, self.directory)
         self.config = {"strava": {"client_id": "test-client-id", "client_secret": "test-client-secret"}}
@@ -155,6 +155,58 @@ class SyncFixture(unittest.TestCase):
 
 
 class SyncTests(SyncFixture):
+    def test_peak_matching_and_weather_share_one_track_request(self):
+        self.activity["start_latlng"] = []
+        self.scenario["streams"] = {"latlng": {"data": [None, [39.9, 116.4], [39.91, 116.41]]}}
+        self.assert_success(self.sync("--activity-id", "123"))
+        streams = [entry for entry in self.requests() if "/streams?" in entry["url"]]
+        self.assertEqual(len(streams), 1)
+        self.assertEqual(self.requests()[-1]["method"], "PUT")
+
+    def test_failed_shared_track_is_not_requested_twice(self):
+        self.activity["start_latlng"] = []
+        self.scenario["streams_status"] = 500
+        result = self.sync("--activity-id", "123")
+        self.assertNotEqual(result.returncode, 0)
+        streams = [entry for entry in self.requests() if "/streams?" in entry["url"]]
+        self.assertEqual(len(streams), 1)
+        self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
+        self.assertEqual(json.loads(self.state.read_text())["pending"], {"123": False})
+
+    def test_budget_pause_before_scan_makes_no_requests(self):
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        (self.directory / ".strava_api_usage.json").write_text(json.dumps({
+            "daily_date": today, "read_daily": 1800, "window": [],
+        }))
+        result = self.sync("--all")
+        self.assertEqual(result.returncode, 4, result.stderr + result.stdout)
+        self.assertEqual(self.requests(), [])
+        self.assertIn("预留", result.stderr)
+
+    def test_budget_pause_during_scan_keeps_discovered_queue(self):
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        (self.directory / ".strava_api_usage.json").write_text(json.dumps({
+            "daily_date": today, "read_daily": 1799, "window": [],
+        }))
+        result = self.sync("--page-size", "1")
+        self.assertEqual(result.returncode, 4, result.stderr + result.stdout)
+        self.assertEqual(len(self.requests()), 1)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["pending"], {"123": False})
+        self.assertIsNone(state["last_scan"])
+        self.assertIsNotNone(state["scan_from"])
+
+    def test_budget_pause_between_activities_keeps_remaining_queue(self):
+        (self.directory / "config.local.json").write_text(json.dumps(dict(
+            self.config, rate_limit={"read_daily": 10, "reserve_read_daily": 6})))
+        self.scenario["activities"] = [self.activity, dict(self.activity, id=124)]
+        result = self.sync()
+        self.assertEqual(result.returncode, 4, result.stderr + result.stdout)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["activities"], {"123": "updated"})
+        self.assertEqual(state["pending"], {"124": False})
+        self.assertFalse(any("/activities/124" in item["url"] for item in self.requests()))
+
     def test_custom_title_is_used_in_preview_updates_and_repeated_force(self):
         path = self.directory / "config.local.json"
         path.write_text(json.dumps(dict(self.config, title={"template": "{emoji} | {title} · 跑步"})))

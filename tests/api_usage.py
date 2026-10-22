@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import tempfile
@@ -25,6 +26,18 @@ def tracker(now=None):
     tmp = tempfile.mkdtemp()
     path = Path(tmp) / ".strava_api_usage.json"
     return api_usage.UsageTracker(path, CONFIG, now_fn=lambda: now if now is not None else time.time())
+
+
+def log_concurrently(path, start):
+    class SlowTracker(api_usage.UsageTracker):
+        def _save(self, data, fd):
+            time.sleep(0.001)
+            super()._save(data, fd)
+
+    start.wait(5)
+    usage = SlowTracker(path, CONFIG, now_fn=lambda: 1760900000)
+    for _ in range(30):
+        usage.log_call("GET", "/a")
 
 
 class UsageTest(unittest.TestCase):
@@ -97,10 +110,25 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
     def test_concurrent_logging_keeps_count(self):
-        t = tracker()
-        for _ in range(50):
-            api_usage.UsageTracker(t.path, CONFIG).log_call("GET", "/a")
-        self.assertEqual(t.get_status()["read_daily_used"], 50)
+        t = tracker(now=1760900000)
+        context = multiprocessing.get_context("fork")
+        start = context.Event()
+        workers = [context.Process(target=log_concurrently, args=(t.path, start)) for _ in range(4)]
+        try:
+            for worker in workers:
+                worker.start()
+            start.set()
+            for worker in workers:
+                worker.join(10)
+                self.assertEqual(worker.exitcode, 0)
+            status = t.get_status()
+            self.assertEqual(status["read_daily_used"], 120)
+            self.assertEqual(status["read_15min_used"], 120)
+        finally:
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+                worker.join()
 
 
 if __name__ == "__main__":

@@ -56,6 +56,17 @@ class StopBatchError(SyncError):
     pass
 
 
+class BudgetPause(SyncError):
+    pass
+
+
+def require_budget(usage):
+    if usage is not None:
+        ok, reason = usage.check_budget(bulk=True)
+        if not ok:
+            raise BudgetPause(reason)
+
+
 def private_open(path, flags):
     fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     info = os.fstat(fd)
@@ -271,15 +282,15 @@ def get_track_points(activity_id):
     """Fetch full GPS track from the streams API. Returns [(lat, lon)] or []."""
     streams = read_strava("streams", activity_id, allow_missing=True)
     if not isinstance(streams, dict):
-        return []
+        raise SyncError("Strava 坐标流格式无效")
     stream = streams.get("latlng") or {}
     points = (stream.get("data") or []) if isinstance(stream, dict) else []
     if not isinstance(points, list):
-        return []
+        raise SyncError("Strava 坐标流格式无效")
     return [tuple(point) for point in points if coordinates(point)]
 
 
-def compute_peak_line(activity_id, activity):
+def compute_peak_line(activity_id, activity, get_points=None):
     """Match peaks against the offline DB. Returns the peak line or ""."""
     helpers = peak_helpers()
     if helpers is None:
@@ -289,7 +300,7 @@ def compute_peak_line(activity_id, activity):
     if sport_type not in SPORT_RULES:
         return ""
     try:
-        points = get_track_points(activity_id)
+        points = get_points() if get_points is not None else get_track_points(activity_id)
     except (SyncError, OSError, ValueError) as error:
         print(f"⚠️ 活动 {activity_id} 轨迹获取失败，跳过山峰匹配：{error}")
         return ""
@@ -345,8 +356,22 @@ def process_activity(args, activity_id, activities, force=False):
     if activity.get("trainer") or str(activity.get("sport_type", "")).startswith("Virtual"):
         print(f"⏭️ 活动 {activity_id} 为室内活动，跳过")
         return "indoor"
-    # 山峰匹配（离线库距离算法，替代 summitbag）；不参与的类型返回空行
-    peak_line = compute_peak_line(activity_id, activity) if args.reorder_summitbag else ""
+    points, track_error = None, None
+
+    def track_points():
+        nonlocal points, track_error
+        if track_error is not None:
+            raise track_error
+        if points is None:
+            try:
+                points = get_track_points(activity_id)
+            except (SyncError, OSError, ValueError) as error:
+                track_error = error
+                raise
+        return points
+
+    # Cache successful and failed track reads for both consumers in this activity.
+    peak_line = compute_peak_line(activity_id, activity, track_points) if args.reorder_summitbag else ""
     # 通勤步：≤10km 的非通勤骑行攒通勤+静音改动（VirtualRide 在上方按室内跳过，不到这里）
     commute_fix = (str(activity.get("sport_type", "")) in ("Ride", "EBikeRide")
                    and (activity.get("distance") or 0) <= 10000
@@ -363,14 +388,7 @@ def process_activity(args, activity_id, activities, force=False):
     else:
         location = coordinates([args.latitude, args.longitude]) if args.latitude is not None else coordinates(activity.get("start_latlng"))
         if location is None:
-            streams = read_strava("streams", activity_id, allow_missing=True)
-            if not isinstance(streams, dict):
-                raise SyncError("Strava 坐标流格式无效")
-            stream = streams.get("latlng") or {}
-            points = (stream.get("data") or []) if isinstance(stream, dict) else []
-            if not isinstance(points, list):
-                raise SyncError("Strava 坐标流格式无效")
-            location = next((coordinates(point) for point in points if coordinates(point)), None)
+            location = next(iter(track_points()), None)
         if location is None:
             raise SyncError(f"活动 {activity_id} 无有效 GPS 坐标，请提供 --latitude 和 --longitude 后重试")
         emoji, description = weather_annotation(activity, location, args.weather_template)
@@ -389,7 +407,7 @@ def enqueue(state, activity_id, force):
         state["pending"][activity_id] = force
 
 
-def discover(args, state, state_path, now):
+def discover(args, state, state_path, now, usage=None):
     if args.activity_id is not None:
         enqueue(state, args.activity_id, args.force)
         if not args.dry_run and args.activity_id in state["pending"]:
@@ -416,6 +434,7 @@ def discover(args, state, state_path, now):
 
     page, found = 1, {}
     while True:
+        require_budget(usage)
         batch = read_strava("list", arguments=(str(args.page_size),), extra={
             "STRAVA_PAGE": str(page), "STRAVA_AFTER": str(max(0, after - 1)), "STRAVA_BEFORE": str(before),
         })
@@ -519,23 +538,12 @@ def main():
                 return 0
             state_path = ROOT / ".strava_weather_state.json"
             state = load_state(state_path)
-            selected = discover(args, state, state_path, int(dt.datetime.now(dt.timezone.utc).timestamp()))
-            # 批量模式（非 webhook 的 --activity-id）受 API 配额预留保护：
-            # 启动前检查一次，处理中每条检查一次，触及预留线就停，剩余留待下轮。
-            bulk = args.activity_id is None
-            usage = usage_tracker() if bulk else None
-            if usage is not None:
-                ok, reason = usage.check_budget(bulk=True)
-                if not ok:
-                    print(f"⏸️ {reason}", file=sys.stderr)
-                    return 0
+            usage = usage_tracker() if args.activity_id is None else None
+            require_budget(usage)
+            selected = discover(args, state, state_path, int(dt.datetime.now(dt.timezone.utc).timestamp()), usage)
             completed, failures, cleared_404 = 0, 0, 0
             for activity_id in selected:
-                if usage is not None:
-                    ok, reason = usage.check_budget(bulk=True)
-                    if not ok:
-                        print(f"⏸️ {reason}", file=sys.stderr)
-                        break
+                require_budget(usage)
                 try:
                     status = process_activity(args, activity_id, state["activities"], state["pending"][activity_id])
                 except (SyncError, OSError, ValueError) as error:
@@ -567,6 +575,9 @@ def main():
             summary += f"，待处理队列 {len(state['pending'])} 条"
             print(summary)
             return 1 if failures else 0
+    except BudgetPause as error:
+        print(f"⏸️ {error}，扫描进度和待处理队列保留", file=sys.stderr)
+        return 4
     except (SyncError, OSError, ValueError) as error:
         print(f"❌ {error}", file=sys.stderr)
         return 1

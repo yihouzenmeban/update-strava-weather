@@ -48,8 +48,8 @@ class TitleTemplate:
                        for literal, field, _, _ in self.parts).strip()
 
 
-def render_title(title, emoji):
-    config = load_config(ROOT)["title"]
+def render_title(title, emoji, config=None):
+    config = config if config is not None else load_config(ROOT)["title"]
     if not config["enabled"]:
         return title
     return TitleTemplate(config["template"]).render(title, emoji)

@@ -187,6 +187,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((self.root / "calls").read_text().splitlines(), ["called", "called"])
         self.assertEqual((self.root / "sleeps").read_text().splitlines(), ["5", "5"])
 
+    def test_backfill_driver_waits_on_budget_pause_even_with_empty_queue(self):
+        for name in ("backfill_all.sh", "strava_common.sh", "project_config.py"):
+            shutil.copy2(ROOT / name, self.root)
+        self.write({"backfill": {"max_rounds": 2, "rate_retry_seconds": 7, "fast_failure_limit": 1}})
+        (self.root / ".strava_weather_state.json").write_text('{"pending": {}}')
+        entry = self.root / "update_strava_weather.sh"
+        entry.write_text('#!/bin/bash\nif [[ ! -e calls ]]; then\n'
+                         '  echo called >> calls\n  exit 4\nfi\necho called >> calls\nexit 0\n')
+        entry.chmod(0o755)
+        (self.root / "bin").mkdir()
+        sleeper = self.root / "bin/sleep"
+        sleeper.write_text('#!/bin/bash\necho "$1" >> sleeps\n')
+        sleeper.chmod(0o755)
+        result = subprocess.run(["bash", "backfill_all.sh"], cwd=self.root,
+                                env={"PATH": f'{self.root / "bin"}:{os.environ["PATH"]}'},
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "calls").read_text().splitlines(), ["called", "called"])
+        self.assertEqual((self.root / "sleeps").read_text().splitlines(), ["7"])
+
     def test_legacy_migration_preserves_credentials_hooks_and_existing_overrides(self):
         (self.root / "strava_config.sh").write_text(
             'CLIENT_ID="legacy-client"\nCLIENT_SECRET="synthetic-secret"\nREORDER_SUMMITBAG=0\n'

@@ -114,22 +114,12 @@ def match_peaks(points, sport_type, db_paths=None):
     clean = [tuple(p) for p in points if valid_point(p)]
     if len(clean) < 2:
         return []
-    # Every track point serves candidate search, entry confirmation and
-    # pass counting (no sampling).
-    samples = clean
     matched = []
-    for peak in candidate_peaks(samples, enter_radius_m, db_paths):
+    for peak in candidate_peaks(clean, enter_radius_m, db_paths):
         name = clean_name(peak["name"])
         if not name:
             continue
-        d_min = min(haversine_m(lat, lon, peak["lat"], peak["lon"]) for lat, lon in samples)
-        if d_min > enter_radius_m:
-            continue
-        # Samples must confirm at least one entry into the same radius.
-        if not any(haversine_m(lat, lon, peak["lat"], peak["lon"]) <= enter_radius_m
-                   for lat, lon in samples):
-            continue
-        passes = count_passes(samples, peak, enter_radius_m)
+        passes = count_passes(clean, peak, enter_radius_m)
         if passes:
             matched.append((name, peak["elevation_m"], passes))
     # Stable order: most passes first, then by name.
@@ -162,7 +152,7 @@ def is_summitbag_line(text):
     return bool(elevation and stripped.startswith(("⛰", "🏔")))
 
 
-def update_peak_line(description, peak_line):
+def update_peak_line(description, peak_line, template=None):
     """Insert/replace the peak line before the weather block.
 
     - User notes stay first, untouched.
@@ -192,7 +182,7 @@ def update_peak_line(description, peak_line):
         return body.rstrip("\r\n") + trailing_nl
 
     # 2) Recompute weather position on the filtered text.
-    spans = weather_spans(body)
+    spans = weather_spans(body, template)
     peak_with_nl = peak_line.strip() + newline
     head = body.rstrip("\r\n")
     if not spans:

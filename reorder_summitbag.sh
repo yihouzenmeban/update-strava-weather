@@ -26,60 +26,24 @@ if [[ "$REORDER_SUMMITBAG" == "0" ]]; then
   exit 0
 fi
 
-if [[ -z "${CLIENT_ID:-}" || "$CLIENT_ID" == *"在这里粘贴"* ]]; then
-  die "请在 config.local.json 的 strava.client_id 中填好 CLIENT_ID"
-fi
-if [[ -z "${CLIENT_SECRET:-}" || "$CLIENT_SECRET" == *"在这里粘贴"* ]]; then
-  die "请在 config.local.json 的 strava.client_secret 中填好 CLIENT_SECRET"
-fi
-[[ -f "$TOKEN_FILE" ]] || die "没有令牌缓存 $TOKEN_FILE，请先跑 ./update_strava_weather.sh login 授权"
+export STRAVA_NONINTERACTIVE=1
+check_config
+require_token
 
-# 确保拿到未过期的 access_token：有效直接用，过期就刷新；刷新失败提示重新授权
-ensure_token() {
-  local access refresh expires now
-  access=$(token_field access_token)
-  refresh=$(token_field refresh_token)
-  expires=$(token_field expires_at)
-  [[ -n "$access" && -n "$refresh" ]] || die "令牌缓存不完整，请跑 ./update_strava_weather.sh login 重新授权"
-
-  now=$(date +%s)
-  if (( now < expires - TOKEN_REFRESH_MARGIN_SECONDS )); then
-    echo "→ 令牌仍有效，跳过刷新"
-    return 0
-  fi
-
-  echo "→ 令牌已过期，刷新中..."
-  local resp
-  resp=$(oauth_token_request refresh_token "$refresh")
-  if ! echo "$resp" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-if "access_token" not in d:
-    print("→ 刷新失败，请跑 ./update_strava_weather.sh login 重新授权");sys.exit(1)
-print("✅ 已刷新")
-'; then
-    return 1
-  fi
-  NEW=$(echo "$resp" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(json.dumps({k:d[k] for k in ("access_token","refresh_token","expires_at","scope") if k in d}))')
-  save_tokens
-  return 0
-}
-
-ensure_token
-
-ACCESS=$(token_field access_token)
 YES="${YES:-}"
 DRY_RUN="${DRY_RUN:-}"
 # 默认仅预览；YES=1 才写入
 APPLY=0
 [[ "$YES" == "1" && "$DRY_RUN" != "1" ]] && APPLY=1
 
-WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FILE:-}" ACCESS="$ACCESS" APPLY="$APPLY" python3 - "$SCRIPT_DIR" <<'PY'
-import json, os, sys, time, urllib.request, urllib.error
+WEATHER_TEMPLATE_FILE="${WEATHER_TEMPLATE_FILE:-}" APPLY="$APPLY" python3 - "$SCRIPT_DIR" <<'PY'
+import json, os, re, subprocess, sys, tempfile, time
+from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
 from weather_template import load_template, reorder_summitbag
 from project_config import load_config
+from api_usage import UsageTracker
 
 config = load_config()
 settings = config["reorder"]
@@ -90,57 +54,49 @@ except ValueError as error:
     print(f"❌ {error}", file=sys.stderr)
     sys.exit(1)
 
-ACCESS = os.environ["ACCESS"]
 APPLY = os.environ["APPLY"] == "1"
-HEADERS = {"Authorization": f"Bearer {ACCESS}"}
+budget = dict(config["rate_limit"])
+budget["reserve_read_15min"] = max(budget["reserve_read_15min"], settings["rate_limit_floor"])
+usage = UsageTracker(config=budget)
+REQUEST_SCRIPT = ('set -euo pipefail; SCRIPT_DIR=$1; source "$SCRIPT_DIR/strava_common.sh"; '
+                  'strava_request "$2" "$3" "${4:-}"')
 
 def req(method, url, data=None):
-    """发请求，返回 (parsed_body, rateLimit_remaining_15min, rateLimit_limit_15min)。
-    剩余配额不足时自动 sleep 等待。"""
+    """Use the shared authenticated transport, usage log and bulk budget."""
     while True:
-        r = urllib.request.Request(url, method=method, headers=HEADERS)
-        if data is not None:
-            r.add_header("Content-Type", "application/json; charset=utf-8")
-            r.data = data.encode("utf-8")
-        try:
-            resp = urllib.request.urlopen(r, timeout=config["http"]["request_timeout_seconds"])
-            body = resp.read().decode("utf-8")
-            rem = resp.headers.get("X-RateLimit-Remaining", "")
-            lim = resp.headers.get("X-RateLimit-Limit", "")
-            # 15 分钟窗口剩余 < 5 就等到补满（按 900s 窗口估算）
-            try:
-                rem15 = int(rem.split(",")[0])
-            except Exception:
-                rem15 = 999
-            if rem15 < settings["rate_limit_floor"]:
-                print(f"  ⏳ 限流剩余 {rem15}，等待 {settings['rate_retry_seconds']}s...", flush=True)
-                time.sleep(settings["rate_retry_seconds"])
-                continue
-            return json.loads(body) if body else {}, rem, lim
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                print(f"  ⏳ 触发限流 429，等待 {settings['rate_retry_seconds']}s...", flush=True)
-                time.sleep(settings["rate_retry_seconds"])
-                continue
-            if e.code in (502, 503, 504):
-                print(f"  ⏳ HTTP {e.code}，{settings['error_retry_seconds']}s 后重试...", flush=True)
-                time.sleep(settings["error_retry_seconds"])
-                continue
-            err = e.read().decode("utf-8", "replace")
-            print(f"  ❌ HTTP {e.code}: {err[:200]}", flush=True)
-            return None, "", ""
-        except urllib.error.URLError as e:
-            # 瞬时网络/SSL 错误，退避重试
-            print(f"  ⏳ 网络错误 {e}，{settings['error_retry_seconds']}s 后重试...", flush=True)
-            time.sleep(settings["error_retry_seconds"])
-            continue
+        ok, reason = usage.check_budget(bulk=True)
+        if not ok:
+            print(f"⏸️ {reason}", file=sys.stderr)
+            sys.exit(4)
+        with tempfile.TemporaryDirectory(prefix="strava-reorder-") as directory:
+            body = Path(directory) / "body.json"
+            if data is not None:
+                body.write_text(data, encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", REQUEST_SCRIPT, "strava-request", sys.argv[1], method, url,
+                 str(body) if data is not None else ""],
+                text=True, capture_output=True)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        error = result.stderr.strip()
+        status = re.search(r"HTTP ([0-9]{3})", error)
+        code = int(status[1]) if status else None
+        if code == 429:
+            delay = settings["rate_retry_seconds"]
+        elif code in (502, 503, 504) or "网络请求失败" in error:
+            delay = settings["error_retry_seconds"]
+        else:
+            print(error or "❌ Strava 请求失败", file=sys.stderr)
+            sys.exit(1)
+        print(f"  ⏳ 请求失败，{delay}s 后重试...", flush=True)
+        time.sleep(delay)
 
 # 1) 分页拉全部活动，过滤 TrailRun
 print("→ 拉取活动列表...", flush=True)
 trails = []
 page = 1
 while True:
-    batch, _, _ = req("GET", f"https://www.strava.com/api/v3/athlete/activities?per_page={settings['page_size']}&page={page}")
+    batch = req("GET", f"https://www.strava.com/api/v3/athlete/activities?per_page={settings['page_size']}&page={page}")
     if not batch:
         break
     trails.extend(a for a in batch if a.get("sport_type") == "TrailRun")
@@ -154,7 +110,7 @@ print(f"→ 共 {len(trails)} 条越野跑活动，逐条拉取描述...", flush
 changes = []  # [{id, name, before, after}]
 for i, a in enumerate(trails, 1):
     aid = a["id"]
-    detail, _, _ = req("GET", f"https://www.strava.com/api/v3/activities/{aid}")
+    detail = req("GET", f"https://www.strava.com/api/v3/activities/{aid}")
     time.sleep(settings["request_interval_milliseconds"] / 1000)
     if not detail:
         continue
@@ -193,7 +149,7 @@ print(f"\n→ 开始写入 {len(changes)} 条...", flush=True)
 ok = 0
 for c in changes:
     body = json.dumps({"description": c["after"]}, ensure_ascii=False)
-    res, _, _ = req("PUT", f"https://www.strava.com/api/v3/activities/{c['id']}", data=body)
+    res = req("PUT", f"https://www.strava.com/api/v3/activities/{c['id']}", data=body)
     if res and "id" in res:
         ok += 1
         print(f"  ✅ {c['id']} {c['name']}", flush=True)

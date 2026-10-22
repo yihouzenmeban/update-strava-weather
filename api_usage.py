@@ -20,6 +20,7 @@ import datetime as dt
 import fcntl
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -54,13 +55,18 @@ class UsageTracker:
     def _load(self, now):
         today = self._utc_date(now)
         try:
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            fd = os.open(str(self.path) + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         except OSError:
             return self._empty(today), None
         try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                raise OSError("unsafe usage lock")
+            os.fchmod(fd, 0o600)
+            # Lock a stable inode: replacing the JSON must not replace the lock.
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
-                with os.fdopen(os.dup(fd), "r", encoding="utf-8") as f:
+                with self.path.open(encoding="utf-8") as f:
                     data = json.load(f)
             except (ValueError, OSError):
                 data = None
@@ -82,7 +88,6 @@ class UsageTracker:
         if fd is None:
             return
         try:
-            os.fchmod(fd, 0o600)
             # atomic replace through temp file
             tmp_fd, tmp_path = tempfile.mkstemp(prefix=".strava_api_usage.", dir=self.path.parent)
             try:

@@ -11,6 +11,7 @@ strava_config.sh.*
 .strava_visibility_pending.json
 .strava_weather_sync.log*
 .strava_api_usage.json
+.strava_api_usage.json.lock
 .env
 .env.*
 
