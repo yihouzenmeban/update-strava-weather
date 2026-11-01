@@ -243,6 +243,13 @@ class SyncTests(SyncFixture):
         self.assert_success(self.sync("--activity-id", "123", "--force"))
         self.assertEqual(self.requests()[-1]["body"]["selected_polyline_style"], "pace")
 
+    def test_map_style_absent_for_walk(self):
+        # 步行不设地图样式（即使有功率数据也不动）
+        self.activity["sport_type"] = "Walk"
+        self.activity["average_watts"] = 200.0
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertNotIn("selected_polyline_style", self.requests()[-1]["body"])
+
     def test_map_style_absent_for_trail_run_hike_and_when_disabled(self):
         # 越野跑即使有功率数据也不动地图样式
         self.activity["sport_type"] = "TrailRun"

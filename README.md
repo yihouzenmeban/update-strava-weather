@@ -289,7 +289,7 @@ Strava 有新活动时官方把事件推送到你的回调地址，
 
 ## 地图样式
 
-进入活动处理流程后，`sync` 按功率数据选择地图样式（`selected_polyline_style`）：详情中的 `average_watts` 或 `weighted_average_watts` 至少一项是非布尔数值且大于 0 时，选择 `map_style.power`；否则选择 `map_style.no_power`。仅有字段但值为 `0`、`null` 或布尔值不算有效功率。越野跑（`TrailRun`）和徒步（`Hike`）不设置；`map_style.enabled` 可关闭此功能，默认值见 [配置](config.default.json)。该字段无法通过 API 读回，同步不判断当前样式是否已经一致；提交时机见 [同步规则](#同步规则)，可选样式见 [官方 PUT 实测](docs/put-activity-api.md)。
+进入活动处理流程后，`sync` 按功率数据选择地图样式（`selected_polyline_style`）：详情中的 `average_watts` 或 `weighted_average_watts` 至少一项是非布尔数值且大于 0 时，选择 `map_style.power`；否则选择 `map_style.no_power`。仅有字段但值为 `0`、`null` 或布尔值不算有效功率。越野跑（`TrailRun`）、徒步（`Hike`）和步行（`Walk`）不设置；`map_style.enabled` 可关闭此功能，默认值见 [配置](config.default.json)。该字段无法通过 API 读回，同步不判断当前样式是否已经一致；提交时机见 [同步规则](#同步规则)，可选样式见 [官方 PUT 实测](docs/put-activity-api.md)。
 
 ## 通勤修正
 

@@ -315,11 +315,11 @@ def compute_peak_line(activity_id, activity, get_points=None):
 
 
 def map_style_for(args, activity):
-    """返回要设置的地图样式：越野跑和徒步不设置；有功率数据用功率样式，否则用配速样式。"""
+    """返回要设置的地图样式：越野跑、徒步和步行不设置；有功率数据用功率样式，否则用配速样式。"""
     config = getattr(args, "map_style", None)
     if not config or not config.get("enabled"):
         return ""
-    if str(activity.get("sport_type", "")) in ("TrailRun", "Hike"):
+    if str(activity.get("sport_type", "")) in ("TrailRun", "Hike", "Walk"):
         return ""
     for key in ("average_watts", "weighted_average_watts"):
         value = activity.get(key)
