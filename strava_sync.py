@@ -376,6 +376,16 @@ def process_activity(args, activity_id, activities, force=False):
     commute_fix = (str(activity.get("sport_type", "")) in ("Ride", "EBikeRide")
                    and (activity.get("distance") or 0) <= 10000
                    and not activity.get("commute"))
+    # 可见性：≤10km 骑行且尚未「只有你」的，记入待处理清单走网页改。
+    # 不依赖 commute 是否刚被翻过——骑行到站时 commute 可能已是 True，
+    # 旧条件（commute_fix 才记入）会静默漏记，见 2026-11-10 活动 20920035302。
+    # 记入放在天气分支之前：天气已处理、无其它待改项时也会提前返回，
+    # 可见性仍需处理，不能跟着跳过。
+    needs_visibility = (str(activity.get("sport_type", "")) in ("Ride", "EBikeRide")
+                        and (activity.get("distance") or 0) <= 10000
+                        and activity.get("visibility") != "only_me")
+    if needs_visibility and not args.dry_run:
+        record_visibility_pending(activity_id)
     map_style = map_style_for(args, activity)
     if not force and has_weather(activity.get("description"), args.weather_template):
         # 天气已由 gearaut 或我方写好（我方是兜底）：天气步跳过，
@@ -395,8 +405,6 @@ def process_activity(args, activity_id, activities, force=False):
         # 无天气：天气块与山峰、地图样式、通勤改动同一次 PUT 写入
         status = update_activity(args, activity, emoji, description, peak_line=peak_line,
                                  map_style=map_style, commute_fix=commute_fix)
-    if commute_fix and status == "updated" and not args.dry_run:
-        record_visibility_pending(activity_id)
     return status
 
 

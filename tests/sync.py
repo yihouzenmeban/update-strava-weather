@@ -320,14 +320,36 @@ class SyncTests(SyncFixture):
         self.assertEqual(puts[0]["body"], {"selected_polyline_style": "pace"})
         self.assertFalse((self.directory / ".strava_visibility_pending.json").exists())
 
-    def test_already_commute_short_ride_is_not_refixed(self):
+    def test_already_commute_short_ride_is_recorded_for_visibility(self):
+        # 到站时 commute 已是 True 的短骑行：不重复改通勤，但可见性不是「只有你」仍要记入清单
+        # （2026-11-10 活动 20920035302：旧条件只看 commute_fix，静默漏记）
         self.scenario["activity"] = dict(self.activity, sport_type="Ride", distance=5000.0,
-                                          commute=True, description=BLOCK)
+                                          commute=True, visibility="everyone", description=BLOCK)
         self.assert_success(self.sync("--activity-id", "123"))
         puts = [entry for entry in self.requests() if entry.get("method") == "PUT"]
         self.assertEqual(len(puts), 1)
         self.assertEqual(puts[0]["body"], {"selected_polyline_style": "pace"})
+        pending = json.loads((self.directory / ".strava_visibility_pending.json").read_text())
+        self.assertEqual(pending, ["123"])
+
+    def test_already_only_me_short_ride_is_not_recorded(self):
+        # 短骑行已是「只有你」：不再记入清单
+        self.scenario["activity"] = dict(self.activity, sport_type="Ride", distance=5000.0,
+                                          commute=True, visibility="only_me", description=BLOCK)
+        self.assert_success(self.sync("--activity-id", "123"))
         self.assertFalse((self.directory / ".strava_visibility_pending.json").exists())
+
+    def test_existing_short_ride_is_still_recorded_for_visibility(self):
+        # 天气已处理、无其它待改项的短骑行：即使状态为 existing 也要记入清单
+        # （记入发生在天气分支之前，不会被提前返回跳过）
+        (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, map_style={"enabled": False})))
+        self.scenario["activity"] = dict(self.activity, sport_type="Ride", distance=5000.0,
+                                          commute=True, visibility="everyone", description=BLOCK)
+        self.assert_success(self.sync("--activity-id", "123"))
+        self.assertFalse(any(entry.get("method") == "PUT" for entry in self.requests()))
+        self.assertEqual(json.loads(self.state.read_text())["activities"], {"123": "existing"})
+        pending = json.loads((self.directory / ".strava_visibility_pending.json").read_text())
+        self.assertEqual(pending, ["123"])
 
     def test_invalid_title_fails_before_any_requests_or_state_updates(self):
         (self.directory / "config.local.json").write_text(json.dumps(dict(self.config, title={"template": "{wrong}"})))
