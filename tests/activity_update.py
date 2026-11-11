@@ -63,6 +63,40 @@ class ActivityUpdateTests(unittest.TestCase):
                     self.build(emoji="🌞")
                 self.assertEqual(self.build(emoji="🌞", force=True), {"name": "室内 🌞"})
 
+    def test_trailrun_chinese_time_title_translates_to_english(self):
+        cases = {
+            "越野跑（上午） 🌞": "Morning Trail Run 🌞",
+            "越野跑（下午） 🌧️": "Afternoon Trail Run 🌧️",
+            "越野跑（傍晚） 🌞": "Evening Trail Run 🌞",
+            "越野跑（凌晨） 🌙": "Early Morning Trail Run 🌙",
+            "越野跑（中午） 🌞": "Midday Trail Run 🌞",
+            "越野跑（晚上） 🌙": "Evening Trail Run 🌙",
+            "越野跑（夜间） 🌙": "Night Trail Run 🌙",
+            "越野跑（深夜） 🌙": "Late Night Trail Run 🌙",
+            "越野跑(上午) 🌞": "Morning Trail Run 🌞",
+            "越野跑（上午）": "Morning Trail Run",
+        }
+        for old, new in cases.items():
+            with self.subTest(old=old):
+                self.activity.update(name=old, sport_type="TrailRun")
+                # 天气已处理时走 reorder_only 分支：只改标题，不动描述
+                self.assertEqual(self.build(reorder_only=True), {"name": new})
+
+    def test_trailrun_title_translation_applies_with_weather_write(self):
+        self.activity.update(name="越野跑（上午）", sport_type="TrailRun")
+        self.assertEqual(
+            self.build(emoji="🌞", description="天气 20.0°C"),
+            {"name": "Morning Trail Run 🌞", "description": "手写备注\n天气 20.0°C"})
+
+    def test_trailrun_title_translation_skips_unknown_time_and_other_sports(self):
+        for name, sport_type in (("越野跑（周末） 🌞", "TrailRun"),
+                                 ("越野跑（上午） 🌞", "Run"),
+                                 ("越野跑（上午） 🌞", "Hike"),
+                                 ("午后远足 🌞", "TrailRun")):
+            with self.subTest(name=name, sport_type=sport_type):
+                self.activity.update(name=name, sport_type=sport_type)
+                self.assertEqual(self.build(reorder_only=True), {})
+
 
 if __name__ == "__main__":
     unittest.main()

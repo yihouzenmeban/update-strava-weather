@@ -55,6 +55,34 @@ def render_title(title, emoji, config=None):
     return TitleTemplate(config["template"]).render(title, emoji)
 
 
+# 越野跑中文时段标题译成英文：越野跑（上午） 🌞 → Morning Trail Run 🌞。
+# 只认「越野跑（时段）」开头的格式，括号后内容（天气符号等）原样保留；
+# 不在表里的时段不翻译，避免猜错。
+TRAILRUN_TIME_EN = {
+    "凌晨": "Early Morning", "清晨": "Early Morning",
+    "早上": "Morning", "早晨": "Morning", "上午": "Morning",
+    "中午": "Midday",
+    "下午": "Afternoon", "午后": "Afternoon",
+    "傍晚": "Evening", "晚上": "Evening",
+    "夜晚": "Night", "夜间": "Night", "深夜": "Late Night",
+}
+TRAILRUN_TITLE_PATTERN = re.compile(r"^越野跑[（(]([^）)]+)[）)]\s*(.*)$", re.S)
+
+
+def translate_trailrun_title(title, sport_type):
+    if str(sport_type) != "TrailRun":
+        return title
+    matched = TRAILRUN_TITLE_PATTERN.match(title.strip())
+    if not matched:
+        return title
+    english = TRAILRUN_TIME_EN.get(matched.group(1).strip())
+    if english is None:
+        return title
+    translated = f"{english} Trail Run"
+    rest = matched.group(2).strip()
+    return f"{translated} {rest}" if rest else translated
+
+
 class WeatherTemplate:
     def __init__(self, source):
         source = source.replace("\r\n", "\n").strip()

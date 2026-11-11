@@ -8,7 +8,7 @@ import sys
 
 from peaks import update_peak_line
 from project_config import load_config
-from weather_template import load_template, render_title, strip_weather
+from weather_template import load_template, render_title, strip_weather, translate_trailrun_title
 
 
 class IndoorActivity(ValueError):
@@ -30,6 +30,8 @@ def build_updates(activity, *, template, title_config, emoji="", description="",
         new_name = render_title(name, emoji.strip(), title_config)
         desc_clean, block = strip_weather(desc, template), description.strip()
         new_desc = (desc_clean + "\n" + block if desc_clean else block) if block else desc_clean
+    # 越野跑「越野跑（时段）」格式标题译成英文；天气已写好只攒改动时同样生效。
+    new_name = translate_trailrun_title(new_name, sport_type)
     if reorder_enabled:
         new_desc = update_peak_line(new_desc, peak_line.strip(), template)
 
