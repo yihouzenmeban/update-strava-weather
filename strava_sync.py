@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
@@ -46,6 +47,21 @@ def usage_tracker():
 ROOT = Path(__file__).resolve().parent
 FIELDS = ("temperature_2m", "apparent_temperature", "relative_humidity_2m", "wind_speed_10m")
 VARIABLES = ",".join(FIELDS + ("weather_code",))
+# Open-Meteo 429 只等一会儿重试一次（与 Strava 限流不同：那是账户级配额，触线即停）。
+# 免费档无 key、按出口 IP 限流，共享出口的他人突发流量也可能触发；等一分钟通常就恢复。
+WEATHER_RETRY_DELAY_SECONDS = 60
+WEATHER_RETRY_MAX_DELAY_SECONDS = 300
+
+
+def weather_retry_delay(error):
+    """Open-Meteo 429 的重试等待秒数：优先用 Retry-After，否则 60 秒，上限 300 秒。"""
+    headers = getattr(error, "headers", None) or {}
+    raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    try:
+        delay = int(raw)
+    except (TypeError, ValueError):
+        return WEATHER_RETRY_DELAY_SECONDS
+    return min(max(delay, 1), WEATHER_RETRY_MAX_DELAY_SECONDS)
 
 
 class SyncError(Exception):
@@ -209,15 +225,21 @@ def weather_annotation(activity, location, template=None):
         raise SyncError("活动缺少有效的 start_date、start_date_local 或 moving_time") from None
     start, end = start_date.timestamp(), start_date.timestamp() + duration
     url, key = weather_url(*location, start, end)
-    try:
-        with urllib.request.urlopen(url, timeout=load_config(ROOT)["http"]["weather_timeout_seconds"]) as response:
-            payload = json.load(response)
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403, 429):
-            raise StopBatchError(f"Open-Meteo HTTP {error.code}，停止本轮处理，待处理记录已保留") from None
-        raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
-    except (urllib.error.URLError, OSError, ValueError):
-        raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
+    payload = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(url, timeout=load_config(ROOT)["http"]["weather_timeout_seconds"]) as response:
+                payload = json.load(response)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code == 429 and attempt == 0:
+                time.sleep(weather_retry_delay(error))
+                continue
+            if error.code in (401, 403, 429):
+                raise StopBatchError(f"Open-Meteo HTTP {error.code}，停止本轮处理，待处理记录已保留") from None
+            raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
+        except (urllib.error.URLError, OSError, ValueError):
+            raise SyncError("Open-Meteo 请求失败，未记录成功，下次可重试") from None
     series = payload.get(key, {}) if isinstance(payload, dict) else {}
     if not isinstance(series, dict):
         raise SyncError("Open-Meteo 未返回有效天气序列，未记录成功")

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import urllib.error
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -924,6 +925,61 @@ class WeatherMathTests(unittest.TestCase):
         activity["start_date_local"] = start.strftime("%Y-%m-%dT00:00:00Z")
         with patch.object(module.urllib.request, "urlopen", return_value=io.StringIO(json.dumps({"hourly": series}))):
             self.assertEqual(module.weather_annotation(activity, (39.9, 116.4))[0], "🌙💨🥶")
+
+    def test_weather_429_retries_once_after_delay(self):
+        module = self.load_module()
+        start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)).replace(hour=0, minute=0, second=0, microsecond=0)
+        activity = {"start_date": start.isoformat(), "start_date_local": start.strftime("%Y-%m-%dT08:00:00Z"), "moving_time": 900}
+        series = {"time": [start.timestamp(), start.timestamp() + 900],
+                  "temperature_2m": [20, 20], "apparent_temperature": [20, 20],
+                  "relative_humidity_2m": [60, 60], "wind_speed_10m": [3, 3], "weather_code": [0, 0]}
+        calls = []
+
+        def urlopen(request, timeout=None):
+            calls.append(request)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(request, 429, "Too Many Requests", {"Retry-After": "120"}, None)
+            return io.StringIO(json.dumps({"hourly": series}))
+
+        with patch.object(module.urllib.request, "urlopen", side_effect=urlopen), \
+                patch.object(module.time, "sleep") as sleep:
+            self.assertEqual(module.weather_annotation(activity, (39.9, 116.4))[0], "🌞")
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(120)
+
+    def test_weather_429_twice_stops_batch_with_default_delay(self):
+        module = self.load_module()
+        start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)).replace(hour=0, minute=0, second=0, microsecond=0)
+        activity = {"start_date": start.isoformat(), "start_date_local": start.strftime("%Y-%m-%dT08:00:00Z"), "moving_time": 900}
+        calls = []
+
+        def urlopen(request, timeout=None):
+            calls.append(request)
+            raise urllib.error.HTTPError(request, 429, "Too Many Requests", None, None)
+
+        with patch.object(module.urllib.request, "urlopen", side_effect=urlopen), \
+                patch.object(module.time, "sleep") as sleep:
+            with self.assertRaises(module.StopBatchError):
+                module.weather_annotation(activity, (39.9, 116.4))
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(60)
+
+    def test_weather_401_does_not_retry(self):
+        module = self.load_module()
+        start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)).replace(hour=0, minute=0, second=0, microsecond=0)
+        activity = {"start_date": start.isoformat(), "start_date_local": start.strftime("%Y-%m-%dT08:00:00Z"), "moving_time": 900}
+        calls = []
+
+        def urlopen(request, timeout=None):
+            calls.append(request)
+            raise urllib.error.HTTPError(request, 401, "Unauthorized", None, None)
+
+        with patch.object(module.urllib.request, "urlopen", side_effect=urlopen), \
+                patch.object(module.time, "sleep") as sleep:
+            with self.assertRaises(module.StopBatchError):
+                module.weather_annotation(activity, (39.9, 116.4))
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()
 
     def test_completed_records_are_saved_before_next_activity_starts(self):
         module = self.load_module()
