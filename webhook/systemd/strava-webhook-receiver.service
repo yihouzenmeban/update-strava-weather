@@ -13,4 +13,6 @@ StandardOutput=append:__HOOK_DIR__/logs/receiver.log
 StandardError=inherit
 
 [Install]
-WantedBy=multi-user.target
+# default.target is the boot target. The Muse guest boots a minimal
+# default.target and never reaches multi-user.target.
+WantedBy=default.target

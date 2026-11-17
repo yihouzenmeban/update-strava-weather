@@ -10,7 +10,7 @@ Listens on 127.0.0.1 only (ngrok is the sole ingress). Handles:
                            and immediately runs hooks from config.local.json
                            (personal extensions that live outside this repo,
                            e.g. kicking off a Garmin->COROS sync)
-  GET  /health          -> liveness probe for the watchdog
+  GET  /health          -> liveness probe
 
 Strava requires a 200 response within ~2s, so event handling never blocks
 the response: the sync is spawned detached and its output goes to the log.
