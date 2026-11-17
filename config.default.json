@@ -30,6 +30,7 @@
     "listen_host": "127.0.0.1",
     "listen_port": 8787,
     "path": "/strava-webhook",
+    "receiver_dir": "",
     "hooks": []
   },
   "ngrok": {

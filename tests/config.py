@@ -169,6 +169,35 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('"/private/ngrok.yml"', tunnel)
         self.assertIn("https://example.invalid", tunnel)
 
+    def test_render_units_honors_receiver_dir_override(self):
+        from project_config import render_units
+        shutil.copytree(ROOT / "webhook/systemd", self.root / "webhook/systemd")
+        self.write({"webhook": {"receiver_dir": "/srv/hook-dir"}, "ngrok": {
+            "domain": "example.invalid", "executable": "/opt/ngrok", "config_file": "/private/ngrok.yml"}})
+        target = self.root / "units"
+        render_units(self.root, target, environ={})
+        receiver = (target / "strava-webhook-receiver.service").read_text()
+        self.assertIn('"/srv/hook-dir/receiver.py"', receiver)
+        self.assertIn("/srv/hook-dir/logs/receiver.log", receiver)
+        self.assertIn("WorkingDirectory=/srv/hook-dir", receiver)
+        tunnel = (target / "strava-webhook-tunnel.service").read_text()
+        self.assertIn("/srv/hook-dir/logs/ngrok.log", tunnel)
+
+    def test_render_units_defaults_receiver_dir_to_repo_webhook(self):
+        from project_config import render_units
+        shutil.copytree(ROOT / "webhook/systemd", self.root / "webhook/systemd")
+        self.write({"ngrok": {
+            "domain": "example.invalid", "executable": "/opt/ngrok", "config_file": "/private/ngrok.yml"}})
+        target = self.root / "units"
+        render_units(self.root, target, environ={})
+        receiver = (target / "strava-webhook-receiver.service").read_text()
+        self.assertIn(str(self.root / "webhook" / "receiver.py"), receiver)
+
+    def test_receiver_dir_must_be_an_absolute_path(self):
+        self.write({"webhook": {"receiver_dir": "relative/hook-dir"}})
+        with self.assertRaisesRegex(ValueError, "必须为有效绝对路径"):
+            self.load()
+
     def test_backfill_driver_uses_configured_round_limit_and_retry_delay(self):
         for name in ("backfill_all.sh", "strava_common.sh", "project_config.py"):
             shutil.copy2(ROOT / name, self.root)

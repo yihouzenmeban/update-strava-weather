@@ -137,6 +137,9 @@ def validate(config):
         raise ValueError("配置 webhook.listen_host 无效")
     if not re.fullmatch(r"/[A-Za-z0-9/_-]+", config["webhook"]["path"]):
         raise ValueError("配置 webhook.path 必须为有效 URL 路径")
+    receiver_dir = config["webhook"]["receiver_dir"]
+    if receiver_dir and (not receiver_dir.startswith("/") or any(char in receiver_dir for char in ('\n', '\r', '\0', '"', '%'))):
+        raise ValueError("配置 webhook.receiver_dir 必须为有效绝对路径")
 
 
 def load_config(root=None, environ=None):
@@ -270,7 +273,8 @@ def render_units(root, destination, environ=None):
     host = config["webhook"]["listen_host"]
     if ":" in host:
         host = f"[{host}]"
-    replacements = {"__HOOK_DIR__": str(root / "webhook"),
+    hook_dir = config["webhook"]["receiver_dir"] or str(root / "webhook")
+    replacements = {"__HOOK_DIR__": hook_dir,
                     "__NGROK_DOMAIN__": config["ngrok"]["domain"],
                     "__NGROK_EXECUTABLE__": config["ngrok"]["executable"],
                     "__NGROK_CONFIG_FILE__": config["ngrok"]["config_file"],

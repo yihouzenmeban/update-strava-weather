@@ -22,7 +22,7 @@ Strava 新活动产生时，官方 webhook 把事件推送到你的公网回调�
 
 先按 [首次配置](../README.md#首次配置) 完成 Strava 授权；启用山峰功能时按 [离线库说明](../peaks/README.md) 准备数据库，`ensure.sh` 不下载数据库。本节针对 Linux + systemd + ngrok；仓库中的模板以 root 运行，接收器使用 `/usr/bin/python3`。配置及 `.strava_tokens.json` 须归服务运行用户所有、权限为 `600`，CLI 授权和后台同步应使用同一身份；不同身份的私有文件会被安全检查拒绝。若需非 root 服务，应相应调整 unit 与文件归属，不盲目修改已有凭据。
 
-安装前，在 `config.local.json` 的 `ngrok` 中配置域名、实际可执行文件及 ngrok 自身配置路径；`ensure.sh` 不安装 ngrok，也不创建其授权配置。
+安装前，在 `config.local.json` 的 `ngrok` 中配置域名、实际可执行文件及 ngrok 自身配置路径；`ensure.sh` 不安装 ngrok，也不创建其授权配置。若接收器不在仓库的 `webhook/` 目录（例如与仓库并列的独立部署目录），在 `config.local.json` 的 `webhook` 中加 `"receiver_dir": "绝对路径"`，渲染出的 unit 会指向该目录；不填则默认用仓库的 `webhook/`。
 
 1. 安装 ngrok，从 [ngrok dashboard](https://dashboard.ngrok.com) 获取 authtoken，配置到 `ngrok.config_file` 指定的文件，权限设为 `600`。将下列覆盖项合入已有的根目录 `config.local.json`，替换域名及路径：
 
