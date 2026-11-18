@@ -34,8 +34,22 @@ class ActivityUpdateTests(unittest.TestCase):
         self.activity.update(name="自定义标题 🏔️", description=(
             "手写备注\n天气 10.0°C\n天气后的备注\n⛰️ 旧峰 (100 m)"))
         self.assertEqual(self.build(reorder_only=True, peak_line="⛰️ 新峰 (500 m)"), {
-            "description": "手写备注\n⛰️ 新峰 (500 m)\n天气 10.0°C\n天气后的备注\n",
+            "description": "手写备注\n⛰️ 新峰 (500 m)\n天气 10.0°C\n天气后的备注",
         })
+
+    def test_reorder_strips_trailing_blank_line_from_gearaut_block(self):
+        # gearaut 天气块自带结尾换行；同步回传时清掉，描述末尾不留空行。
+        gearaut_desc = (
+            "温度: 1.46°C - 1.86°C  体感温度: -3.10°C - -2.50°C\n"
+            "湿度: 29% - 30%  风速: 12.86 km/h - 11.75 km/h\n"
+            "Powered By www.gearaut.com\n")
+        self.activity.update(description=gearaut_desc)
+        self.assertEqual(self.build(reorder_only=True), {
+            "description": gearaut_desc.rstrip("\n"),
+        })
+        # 已干净的描述不再产生改动。
+        self.activity["description"] = gearaut_desc.rstrip("\n")
+        self.assertEqual(self.build(reorder_only=True), {})
 
     def test_repeated_weather_and_peaks_produce_no_changes(self):
         self.activity.update(self.build(emoji="🌞", description="天气 20.0°C", peak_line="⛰️ 新峰 (500 m)"))

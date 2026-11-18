@@ -34,6 +34,9 @@ def build_updates(activity, *, template, title_config, emoji="", description="",
     new_name = translate_trailrun_title(new_name, sport_type)
     if reorder_enabled:
         new_desc = update_peak_line(new_desc, peak_line.strip(), template)
+    # 同步写出的描述不留末尾空行：gearaut 天气块自带一个结尾换行，
+    # 原样回传会在 Strava 里多出一行空白；只清末尾换行，不动内容。
+    new_desc = new_desc.rstrip("\r\n")
 
     updates = {key: value for key, value, previous in (
         ("name", new_name, name), ("description", new_desc, desc)) if value != previous}
